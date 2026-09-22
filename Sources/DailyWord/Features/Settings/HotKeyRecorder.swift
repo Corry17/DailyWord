@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-/// 快捷键录制按钮：无修饰键仅面板内生效；Esc 仅取消，不清空原绑定。
+/// 快捷键录制按钮：点击后按下你想要的组合键即可（需含至少一个修饰键）
 struct HotKeyRecorder: View {
     let binding: HotKeyBinding
     let onRecord: (HotKeyBinding) -> Void
@@ -32,7 +32,6 @@ struct HotKeyRecorder: View {
 
             if binding.isSet {
                 Button {
-                    isRecording = false
                     onRecord(.none)
                 } label: {
                     Image(systemName: "xmark.circle.fill")
@@ -62,67 +61,23 @@ private struct KeyRecorderCatcher: NSViewRepresentable {
     func makeNSView(context: Context) -> RecorderView {
         let view = RecorderView()
         view.onCapture = onCapture
-        view.onCancel = { isRecording = false }
         return view
     }
 
     func updateNSView(_ nsView: RecorderView, context: Context) {
         nsView.onCapture = onCapture
-        nsView.onCancel = { isRecording = false }
         nsView.isRecording = isRecording
         if isRecording {
             nsView.window?.makeFirstResponder(nsView)
         }
     }
-
-    static func dismantleNSView(_ nsView: RecorderView, coordinator: ()) {
-        nsView.onCancel = nil
-        nsView.onCapture = nil
-        nsView.isRecording = false
-    }
 }
 
 final class RecorderView: NSView {
     var onCapture: ((HotKeyBinding) -> Void)?
-    var onCancel: (() -> Void)?
-    private let recordingID = UUID()
     var isRecording = false {
-        didSet {
-            guard oldValue != isRecording else { return }
-            if isRecording {
-                window?.makeFirstResponder(self)
-                AppServices.shared.beginHotKeyRecording(recordingID)
-            } else {
-                AppServices.shared.endHotKeyRecording(recordingID)
-            }
-        }
+        didSet { if isRecording { window?.makeFirstResponder(self) } }
     }
-
-    override func resignFirstResponder() -> Bool {
-        let resigned = super.resignFirstResponder()
-        if resigned { cancelRecording() }
-        return resigned
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        NotificationCenter.default.removeObserver(self)
-        guard let window else { cancelRecording(); return }
-        for name in [NSWindow.didResignKeyNotification, NSWindow.willCloseNotification] {
-            NotificationCenter.default.addObserver(self, selector: #selector(cancelRecording), name: name, object: window)
-        }
-    }
-
-    @objc private func cancelRecording() {
-        guard isRecording else { return }
-        isRecording = false
-        DispatchQueue.main.async { [weak self] in
-            guard let self, !self.isRecording else { return }
-            self.onCancel?()
-        }
-    }
-
-    deinit { NotificationCenter.default.removeObserver(self) }
 
     override var acceptsFirstResponder: Bool { isRecording }
 
@@ -130,14 +85,12 @@ final class RecorderView: NSView {
         guard isRecording else { return super.keyDown(with: event) }
         // Esc 取消录制
         if event.keyCode == 53 {
-            isRecording = false
-            onCancel?()
+            onCapture?(.none)
             return
         }
         let modifiers = HotKeyBinding.carbonModifiers(from: event.modifierFlags)
         let candidate = HotKeyBinding(keyCode: Int(event.keyCode), modifiers: modifiers)
         // 无修饰键（如空格）也允许，但只在 DailyWord 面板内生效
-        isRecording = false
         onCapture?(candidate)
     }
 

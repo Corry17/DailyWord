@@ -118,11 +118,11 @@ enum HotKeyAction: String, CaseIterable, Identifiable {
         case .toggleQuiz: return HotKeyBinding(keyCode: kVK_ANSI_D, modifiers: optionKey)
         case .opacityUp: return HotKeyBinding(keyCode: kVK_ANSI_Equal, modifiers: optionKey)
         case .opacityDown: return HotKeyBinding(keyCode: kVK_ANSI_Minus, modifiers: optionKey)
-        // ⌥ 方向键：面板移动快捷键（与其他动作修饰键一致；⌃⌥ 组合可能被系统拦截导致不触发）
-        case .panelLeft: return HotKeyBinding(keyCode: kVK_LeftArrow, modifiers: optionKey)
-        case .panelRight: return HotKeyBinding(keyCode: kVK_RightArrow, modifiers: optionKey)
-        case .panelUp: return HotKeyBinding(keyCode: kVK_UpArrow, modifiers: optionKey)
-        case .panelDown: return HotKeyBinding(keyCode: kVK_DownArrow, modifiers: optionKey)
+        // ⌃⌥ 方向键：面板移动快捷键（用户指定，不加 ⌘）
+        case .panelLeft: return HotKeyBinding(keyCode: kVK_LeftArrow, modifiers: optionKey | controlKey)
+        case .panelRight: return HotKeyBinding(keyCode: kVK_RightArrow, modifiers: optionKey | controlKey)
+        case .panelUp: return HotKeyBinding(keyCode: kVK_UpArrow, modifiers: optionKey | controlKey)
+        case .panelDown: return HotKeyBinding(keyCode: kVK_DownArrow, modifiers: optionKey | controlKey)
         case .translateSelection: return HotKeyBinding(keyCode: kVK_ANSI_T, modifiers: optionKey)
         case .translateInput: return HotKeyBinding(keyCode: kVK_ANSI_T, modifiers: optionKey | controlKey)
         case .showWordDetail: return HotKeyBinding(keyCode: kVK_ANSI_I, modifiers: optionKey)
@@ -132,9 +132,14 @@ enum HotKeyAction: String, CaseIterable, Identifiable {
 }
 
 /// 一个快捷键绑定（自定义录制：keyCode + Carbon 修饰键）
-typealias HotKeyBinding = ShortcutBinding
+struct HotKeyBinding: Equatable {
+    var keyCode: Int
+    var modifiers: Int
 
-extension ShortcutBinding {
+    /// 未绑定
+    static let none = HotKeyBinding(keyCode: -1, modifiers: 0)
+
+    var isSet: Bool { keyCode >= 0 }
 
     /// 人类可读标签，如 "⌥⇧D"
     var label: String {
@@ -166,6 +171,19 @@ extension ShortcutBinding {
         if modifiers & controlKey != 0 { result.insert(.control) }
         if modifiers & shiftKey != 0 { result.insert(.shift) }
         return result
+    }
+
+    var storage: String { "\(keyCode):\(modifiers)" }
+
+    init(keyCode: Int, modifiers: Int) {
+        self.keyCode = keyCode
+        self.modifiers = modifiers
+    }
+
+    init?(storage: String) {
+        let parts = storage.split(separator: ":")
+        guard parts.count == 2, let key = Int(parts[0]), let mod = Int(parts[1]) else { return nil }
+        self.init(keyCode: key, modifiers: mod)
     }
 
     /// 由 NSEvent 修饰键转换为 Carbon 修饰键
@@ -332,7 +350,12 @@ final class AppSettings: ObservableObject {
 
     /// 设置绑定；与其他动作冲突时先释放对方
     func setHotKey(_ binding: HotKeyBinding, for action: HotKeyAction) {
-        hotKeys = HotKeyBinding.assigning(binding, to: action, in: hotKeys)
+        if binding.isSet {
+            for (other, existing) in hotKeys where other != action && existing == binding {
+                hotKeys[other] = .none
+            }
+        }
+        hotKeys[action] = binding
         persistHotKeys()
         AppServices.shared.registerHotKeys()
     }
@@ -421,9 +444,21 @@ final class AppSettings: ObservableObject {
         translateWholeSentence = defaults.bool(forKey: "translateWholeSentence")
 
         let raw = defaults.dictionary(forKey: "hotKeyBindingsV2") as? [String: String] ?? [:]
-        hotKeys = Self.restoredHotKeys(raw)
-        let canonical = Dictionary(uniqueKeysWithValues: hotKeys.map { ($0.key.rawValue, $0.value.storage) })
-        if canonical != raw { persistHotKeys() }
+        hotKeys = Dictionary(uniqueKeysWithValues: HotKeyAction.allCases.map { action in
+            let binding = raw[action.rawValue].flatMap(HotKeyBinding.init(storage:)) ?? action.defaultBinding
+            return (action, binding)
+        })
+        // 迁移：把之前自动升级为 ⌃⌥⌘ 的移动键 改回 ⌃⌥（用户要求不带 ⌘）
+        var migrated = false
+        for action in [HotKeyAction.panelLeft, .panelRight, .panelUp, .panelDown] {
+            if var b = hotKeys[action], b.modifiers & cmdKey != 0,
+               b.modifiers & (optionKey | controlKey) == (optionKey | controlKey) {
+                b.modifiers &= ~cmdKey
+                hotKeys[action] = b
+                migrated = true
+            }
+        }
+        if migrated { persistHotKeys() }
     }
 
     /// 导入数据后：从 UserDefaults 重新读回全部设置（内存缓存刷新，立即生效）
@@ -460,17 +495,10 @@ final class AppSettings: ObservableObject {
         translateWholeSentence = defaults.bool(forKey: "translateWholeSentence")
 
         let raw = defaults.dictionary(forKey: "hotKeyBindingsV2") as? [String: String] ?? [:]
-        hotKeys = Self.restoredHotKeys(raw)
-        let canonical = Dictionary(uniqueKeysWithValues: hotKeys.map { ($0.key.rawValue, $0.value.storage) })
-        if canonical != raw { persistHotKeys() }
-    }
-
-    private static func restoredHotKeys(_ raw: [String: String]) -> [HotKeyAction: HotKeyBinding] {
-        let defaults = Dictionary(uniqueKeysWithValues: HotKeyAction.allCases.map { ($0, $0.defaultBinding) })
-        let stored = Dictionary(uniqueKeysWithValues: HotKeyAction.allCases.compactMap { action in
-            raw[action.rawValue].map { (action, $0) }
+        hotKeys = Dictionary(uniqueKeysWithValues: HotKeyAction.allCases.map { action in
+            let binding = raw[action.rawValue].flatMap(HotKeyBinding.init(storage:)) ?? action.defaultBinding
+            return (action, binding)
         })
-        return HotKeyBinding.restoring(defaults: defaults, stored: stored, order: HotKeyAction.allCases)
     }
 
     private func persistWordColor() {

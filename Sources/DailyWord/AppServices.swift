@@ -1,7 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
 import Combine
-import ObjectiveC
 import SwiftUI
 import DailyWordCore
 
@@ -11,19 +10,6 @@ final class WordDetailState: ObservableObject {
     static let shared = WordDetailState()
     @Published var headword: String?
     private init() {}
-}
-
-/// 观察者跟随窗口释放，不让关闭回调留在全局通知中心。
-private final class WindowCloseObservation {
-    private var token: NSObjectProtocol?
-    @MainActor
-    init(window: NSWindow, handler: @escaping @MainActor () -> Void) {
-        token = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification,
-                                                       object: window, queue: .main) { _ in
-            Task { @MainActor in handler() }
-        }
-    }
-    deinit { if let token { NotificationCenter.default.removeObserver(token) } }
 }
 
 @MainActor
@@ -41,9 +27,7 @@ final class AppServices {
     private(set) var studyPanel: StudyPanelController!
     private(set) var statusItem: StatusItemController!
 
-    private var onboardingRewardsWindow: NSPanel?
-    private var onboardingDemoWindow: NSPanel?
-    private let onboardingDemo = OnboardingDemoModel()
+    private var onboardingWindow: NSWindow?
     private var libraryWindow: NSWindow?
     private var gameWindow: NSWindow?
     private var wordDetailWindow: NSWindow?
@@ -76,18 +60,8 @@ final class AppServices {
     }
     private var wordDetailHeadword: String?
     private var settingsWindow: NSPanel?
-    private var coachPanel: CoachMarkPanel?
-    private var coachPresentationTask: Task<Void, Never>?
-    private var coachAdvanceTask: Task<Void, Never>?
-    private var coachObservers: [AnyCancellable] = []
-    private weak var coachLastTargetWindow: NSWindow?
-    private enum CoachSurface: Hashable { case study, quiz, library, settings, rewards }
-    private var coachOwnedWindows: [CoachSurface: NSWindow] = [:]
+    private var coachPanel: NSPanel?
     private var hotKeys: [GlobalHotKey] = []
-    private var hotKeyRecordingOwner: UUID?
-    private var localPanelClickMonitor: Any?
-    private var globalPanelClickMonitor: Any?
-    private static var closeObservationKey: UInt8 = 0
     private var badgeCancellable: AnyCancellable?
 
     // 无感弹卡抑制来源（任一为 true 时暂停弹卡）
@@ -109,30 +83,25 @@ final class AppServices {
         self.quiz = QuizOverlayController(engine: engine)
         self.quiz.onVisibilityChanged = { [weak self] in
             self?.updateAmbientSuppression()
-            self?.renderCoachMark()
         }
         self.onboardingFlow.onStepChanged = { [weak self] _ in
-            self?.prepareOnboardingStep()
-        }
-        self.onboardingFlow.onCelebrate = { [weak self] _ in
             guard let self, self.onboardingFlow.isActive else { return }
-            // 只刷新鼓励文案，不重新打开本步窗口，也不抢走输入焦点。
-            self.renderCoachMark()
-            self.coachAdvanceTask?.cancel()
-            let token = self.onboardingFlow.revision
-            self.coachAdvanceTask = Task { @MainActor [weak self] in
-                do { try await Task.sleep(nanoseconds: 1_600_000_000) } catch { return }
-                guard let self, self.onboardingFlow.celebrating else { return }
-                self.onboardingFlow.advance(ifCurrent: token)
+            self.presentCoachMark()
+        }
+        self.onboardingFlow.onCelebrate = { [weak self] praise in
+            guard let self, self.onboardingFlow.isActive else { return }
+            // 先把气泡切换为鼓励态，稍后自动进入下一步
+            self.presentCoachMark(praise: praise)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in
+                guard let self, self.onboardingFlow.isActive,
+                      self.onboardingFlow.celebrating else { return }
+                self.onboardingFlow.advance()
             }
         }
         self.studyPanel = StudyPanelController(session: session)
         self.studyPanel.onVisibilityChanged = { [weak self] in
             guard let self else { return }
             self.setStudyOpen(self.studyPanel.isVisible)
-            // 翻译监听只依赖翻译窗口，不由学习面板开启。
-            self.refreshTranslateSync()
-            self.renderCoachMark()
         }
         self.statusItem = StatusItemController(session: session)
     }
@@ -161,20 +130,7 @@ final class AppServices {
                 self?.statusItem.updateBadge(dueCount: count)
             }
         ambient.start()
-        #if DEBUG
-        // 调试：DAILYWORD_ONBOARDING_STEP=study 等直接进入指定引导步骤，用于复现气泡定位。
-        if let raw = ProcessInfo.processInfo.environment["DAILYWORD_ONBOARDING_STEP"]?.lowercased(),
-           let target = OnboardingFlow.Step.allCases.first(where: { "\($0.rawValue)" == raw || String(describing: $0) == raw }) {
-            showOnboarding()
-            while onboardingFlow.step != target {
-                onboardingFlow.advance(ifCurrent: onboardingFlow.revision)
-            }
-        } else {
-            showOnboardingIfNeeded()
-        }
-        #else
         showOnboardingIfNeeded()
-        #endif
         // 应用持久化的发音口音设置
         SpeechService.shared.accent = AppSettings.shared.accent
         // 全局快捷键（可在设置中修改）
@@ -190,20 +146,8 @@ final class AppServices {
     /// 按设置（重新）注册全局热键。
     /// 只有带修饰键的绑定才注册为系统级；无修饰键（如空格）由面板内的
     /// SwiftUI 快捷键承接（见 StudyView），不会抢占其他 App 的按键。
-    func beginHotKeyRecording(_ owner: UUID) {
-        hotKeyRecordingOwner = owner
-        hotKeys = []   // 已绑定的全局键也必须交给录制器，而不是执行原动作。
-    }
-
-    func endHotKeyRecording(_ owner: UUID) {
-        guard hotKeyRecordingOwner == owner else { return }
-        hotKeyRecordingOwner = nil
-        registerHotKeys()
-    }
-
     func registerHotKeys() {
         hotKeys = []
-        guard hotKeyRecordingOwner == nil else { return }
         for action in HotKeyAction.allCases {
             let binding = AppSettings.shared.hotKeys[action] ?? .none
             guard binding.isGlobal else { continue }
@@ -220,20 +164,16 @@ final class AppServices {
                                          repeatInterval: repeatInterval,
                                          callback: { Task { @MainActor in AppServices.shared.perform(action) } }) {
                 hotKeys.append(hotKey)
-                debugLog("热键注册成功: \(action.rawValue) key=\(binding.keyCode) mods=\(binding.modifiers)")
             } else {
                 // 自查日志：注册失败（如与系统快捷键冲突）
                 NSLog("[热键] 注册失败: \(action.rawValue) keyCode=\(binding.keyCode) mods=\(binding.modifiers)")
-                debugLog("热键注册失败: \(action.rawValue) key=\(binding.keyCode) mods=\(binding.modifiers)")
             }
         }
     }
 
     /// 执行快捷键动作
     func perform(_ action: HotKeyAction) {
-        guard hotKeyRecordingOwner == nil else { return }
         debugLog("快捷键触发: \(action.rawValue)")
-        if performOnboardingAction(action) { return }
         switch action {
         case .revealWord:
             session.toggleReveal()
@@ -296,166 +236,79 @@ final class AppServices {
     private var translateInputPanel: TripleClickPanel?
     private var translateClickMonitor: Any?
     private var lastTranslatedText = ""
-    private var selectionState = SelectionTranslationState()
-    private var selectionReadTask: Task<Void, Never>?
-    private let selectionReadQueue = DispatchQueue(label: "DailyWord.selectionReader", qos: .userInitiated)
-    private var selectionSourcePID: pid_t?
-    private var selectionIsReading = false
-    private var translateKeyMonitor: Any?
 
     /// 划词翻译：读取当前选中文本 → 翻译 → 浮窗显示；再次按快捷键隐藏
+    private var lastTranslateSelectionCloseTime: TimeInterval = 0
     private func translateSelection() {
-        if selectionState.isOpen {
-            closeTranslateResult()
+        // toggle：结果浮窗已显示 → 关闭
+        if let panel = translateResultPanel {
+            lastTranslateSelectionCloseTime = Date().timeIntervalSinceReferenceDate
+            ResizableTranslatePanel.saveOrigin(panel.frame.origin)
+            panel.orderOut(nil)
+            translateResultPanel = nil
+            translateHostingController = nil
+            stopTranslateSync()
             return
         }
         guard ensureAccessibilityPermission() else { return }
-        selectionSourcePID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        selectionState.open()
         showNetworkHintIfNeeded()
-        updateTranslateResult(source: "", sourceLines: ["等待选中文本"],
-                              targetLines: ["窗口打开期间，选中文本会自动更新"])
         performSelectionTranslation()
     }
 
-    /// 显式重试会回到上一次取词的应用，不读取翻译浮窗自己的文本。
-    func retrySelectionTranslation() {
-        guard selectionState.isOpen, let pid = selectionSourcePID,
-              let app = NSRunningApplication(processIdentifier: pid) else { return }
-        app.activate(options: .activateIgnoringOtherApps)
-        requestSelection(pid: pid, explicit: true)
-    }
-
+    /// 执行一次划词翻译（首次或点击同步共用）
     private func performSelectionTranslation() {
-        guard let pid = selectionSourcePID, pid != ProcessInfo.processInfo.processIdentifier else { return }
-        requestSelection(pid: pid, explicit: true)
-    }
-
-    /// 每个新选中产生独立令牌；去抖只合并同一轮连续事件，不丢弃快速选择的新词。
-    private func requestSelection(pid: pid_t, explicit: Bool = false, copiedAfter: Int? = nil) {
-        guard selectionState.isOpen, let request = selectionState.beginRequest(preservingClipboard: copiedAfter != nil) else { return }
-        selectionReadTask?.cancel()
-        selectionSourcePID = pid
-        selectionIsReading = true
-        selectionReadTask = Task { @MainActor [weak self] in
-            do { try await Task.sleep(nanoseconds: 120_000_000) } catch { return }
-            guard let self, self.selectionState.accepts(request) else { return }
-            self.selectionReadQueue.async { [weak self] in
-                guard SelectedTextReader.validTarget(pid, request: request) else { return }
-                var acquired: String?
-                if let count = copiedAfter {
-                    acquired = SelectedTextReader.newlyCopiedText(after: count, pid: pid, request: request)
-                } else {
-                    for attempt in 0..<2 where !request.isCancelled {
-                        switch SelectedTextReader.accessibility(pid: pid, request: request) {
-                        case .text(let text): acquired = text
-                        case .empty: break
-                        case .unavailable:
-                            if attempt == 1 { acquired = SelectedTextReader.copySelection(pid: pid, request: request) }
-                        }
-                        if acquired != nil { break }
-                        if attempt == 0 { Thread.sleep(forTimeInterval: 0.12) }
-                    }
-                }
-                let text = acquired
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, self.selectionState.accepts(request) else { return }
-                    self.selectionIsReading = false
-                    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else { return }
-                    if let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        self.handleAcquiredText(text, request: request)
-                    } else if explicit || self.lastTranslatedText.isEmpty {
-                        self.lastTranslatedText = ""
-                        self.updateTranslateResult(source: "", sourceLines: ["未获取到选中文本"],
-                                                   targetLines: ["请选中要翻译的文本，窗口会自动更新"])
-                    } else {
-                        self.updateTranslateResult(source: self.lastTranslatedText,
-                                                   sourceLines: TranslationService.shared.splitSentences(self.lastTranslatedText),
-                                                   targetLines: ["未读取到新的选区，已保留原文；可重新选中后重试"])
-                    }
-                }
-            }
+        // 优先 AX 读取（无副作用）；AX 失败才用剪贴板兜底（仅在用户主动点击时）
+        guard let text = selectedTextViaAccessibility() ?? selectedTextViaCopyPaste(), !text.isEmpty else {
+            updateTranslateResult(source: "未获取到选中文本",
+                                  sourceLines: ["未获取到选中文本"],
+                                  targetLines: ["请先在任意应用中选中单词或句子，再按快捷键"])
+            // 尚未获取到文本：也要启动同步监听，用户随后选中时会自动更新
+            startTranslateSync()
+            return
         }
+        lastTranslatedText = text
+        translateSentencesWith(text: text)
     }
 
-    private func handleAcquiredText(_ text: String, request: TranslationRequest) {
-        guard selectionState.accepts(request) else { return }
-        lastTranslatedText = text
-        let sourceLines = TranslationService.shared.splitSentences(text)
-        updateTranslateResult(source: text, sourceLines: sourceLines, targetLines: ["翻译中…"])
-        TranslationService.shared.translateSentences(text, request: request) { [weak self] translated, error in
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.selectionState.accepts(request), self.translateResultPanel != nil else { return }
-                let message = error == .noNetwork ? "网络未连接，请检查网络后重试" : "翻译失败，请重试"
-                self.updateTranslateResult(source: text, sourceLines: sourceLines, targetLines: translated ?? [message])
+    /// 逐句翻译并更新浮窗（网络/翻译失败时显示对应提示）
+    private func translateSentencesWith(text: String) {
+        TranslationService.shared.translateSentences(text) { [weak self] translated, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let sourceLines = TranslationService.shared.splitSentences(text)
+                if let translated, !translated.isEmpty {
+                    self.updateTranslateResult(source: text,
+                                               sourceLines: sourceLines,
+                                               targetLines: translated)
+                } else {
+                    let message = (error == .noNetwork)
+                        ? "网络未连接，请检查网络后重试"
+                        : "翻译失败，请重试"
+                    self.updateTranslateResult(source: text,
+                                               sourceLines: sourceLines,
+                                               targetLines: [message])
+                }
+                self.startTranslateSync()
             }
         }
     }
 
     /// 首次使用翻译功能时提醒需要联网（只提醒一次）
-    /// 注意：不能用 NSAlert.runModal()——菜单栏应用无主窗口时模态弹窗不显示却会阻塞主线程，
-    /// 导致翻译窗口打不开、界面卡死。改为非阻塞（浮窗内已有网络错误提示兜底）。
     private func showNetworkHintIfNeeded() {
         guard !UserDefaults.standard.bool(forKey: "translationNetworkHintShown") else { return }
         UserDefaults.standard.set(true, forKey: "translationNetworkHintShown")
-        debugLog("首次翻译：提示需要联网（非阻塞，不弹模态窗）")
+        let alert = NSAlert()
+        alert.messageText = "翻译需要联网"
+        alert.informativeText = "划词翻译和输入翻译使用在线翻译服务，需要连接网络才能使用；网络不可用时请检查网络后重试。"
+        alert.addButton(withTitle: "知道了")
+        alert.runModal()
     }
 
-    /// 最近一次鼠标按下位置（全局坐标，用于区分"拖选"与"单击定位"）
-    private var mouseDownLocation: NSPoint?
-    /// 最近一次左键按下的 clickCount（全局 leftMouseDown 事件中可靠，用于检测双击/三击选词）
-    private var mouseDownClickCount: Int = 0
-    private var mouseDownPID: pid_t?
-    private var mouseDownMonitor: Any?
-
-    /// 监听仅存在于主动打开的翻译会话，内容刷新不重新安装监听器。
+    /// 同步机制：监听全局鼠标点击（选择文本后点击/松开即触发），不干扰键盘输入
     private func startTranslateSync() {
-        guard selectionState.isOpen, translateClickMonitor == nil else { return }
-        // 按下时记录位置和点击次数——双击/三击是明确选词手势
-        mouseDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
-            self?.mouseDownLocation = NSEvent.mouseLocation
-            self?.mouseDownClickCount = event.clickCount
-            self?.mouseDownPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-            // 新点击使尚未完成的取词失效，但不取消已在翻译的当前文本。
-            if self?.selectionIsReading == true { self?.selectionState.current?.cancel() }
-        }
-        translateClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp, .rightMouseUp]) { [weak self] event in
-            // 右键菜单 → 无选中意图，直接跳过
-            let hasSelectionGesture: Bool
-            if event.type == .rightMouseUp {
-                hasSelectionGesture = false
-            } else {
-                let mouse = NSEvent.mouseLocation
-                // 拖选距离（按下位置与松开位置差，>30pt 才算有效拖选，过滤 PDF/IDE 中点击微位移）
-                let dragDistance = self?.mouseDownLocation.map { hypot($0.x - mouse.x, $0.y - mouse.y) } ?? 0
-                // 双击/三击选词（clickCount 在 leftMouseDown 中可靠）
-                let isMultiClick = (self?.mouseDownClickCount ?? 0) >= 2
-                hasSelectionGesture = (dragDistance > 30 || isMultiClick)
-                    && self?.mouseDownPID == NSWorkspace.shared.frontmostApplication?.processIdentifier
-            }
-            // 关键：用完立即重置按下状态——防止上一次双击/拖选的残留值
-            // 被下一次单击误判为"选中手势"（"翻译后马上又跳成复制内容"的根因）
-            self?.mouseDownLocation = nil
-            self?.mouseDownClickCount = 0
-            self?.mouseDownPID = nil
-            self?.syncSelection(hasSelectionGesture: hasSelectionGesture)
-        }
-        translateKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
-            guard let self, self.selectionState.isOpen, !event.isARepeat,
-                  let cgEvent = event.cgEvent,
-                  cgEvent.getIntegerValueField(.eventSourceUserData) != SelectedTextReader.syntheticCopyTag,
-                  let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return }
-            let flags = event.modifierFlags.intersection([.command, .option, .control, .shift])
-            if event.type == .keyDown, event.keyCode == 8, flags == .command {
-                // 只观察真实复制前后的变化，不轮询或翻译历史剪贴板。
-                SelectedTextReader.interruptCopy()
-                let baseline = NSPasteboard.general.changeCount
-                self.requestSelection(pid: pid, copiedAfter: baseline)
-            } else if event.type == .keyUp,
-                      (event.keyCode == 0 && flags == .command) ||
-                      (flags.contains(.shift) && [123, 124, 125, 126].contains(Int(event.keyCode))) {
-                self.requestSelection(pid: pid)
-            }
+        stopTranslateSync()
+        translateClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp, .rightMouseUp]) { [weak self] _ in
+            Task { @MainActor in self?.syncSelection() }
         }
     }
 
@@ -464,48 +317,35 @@ final class AppServices {
             NSEvent.removeMonitor(monitor)
             translateClickMonitor = nil
         }
-        if let monitor = mouseDownMonitor {
-            NSEvent.removeMonitor(monitor)
-            mouseDownMonitor = nil
-        }
-        if let monitor = translateKeyMonitor { NSEvent.removeMonitor(monitor) }
-        translateKeyMonitor = nil
-        mouseDownLocation = nil
-        mouseDownClickCount = 0
-        mouseDownPID = nil
     }
 
-    /// 按"翻译浮窗是否存在"刷新监听：
-    /// 仅当浮窗打开时才监听选中（实时刷新内容）；浮窗关闭后不再响应选中，
-    /// 避免打卡窗口开着时误选文本就自动弹窗（需翻译请按快捷键或点浮窗 ↻）
-    private func refreshTranslateSync() {
-        if selectionState.isOpen, translateResultPanel != nil {
-            startTranslateSync()
-        } else {
+    private func syncSelection() {
+        guard let panel = translateResultPanel else {
             stopTranslateSync()
+            return
         }
-    }
-
-    private func syncSelection(hasSelectionGesture: Bool = false) {
-        guard selectionState.isOpen, let panel = translateResultPanel, hasSelectionGesture,
-              !panel.frame.contains(NSEvent.mouseLocation),
-              let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
-              pid != ProcessInfo.processInfo.processIdentifier else { return }
-        requestSelection(pid: pid)
+        // 鼠标在浮窗内：用户在选中浮窗文本做对照，不重新翻译
+        let mouse = NSEvent.mouseLocation
+        if panel.frame.contains(mouse) { return }
+        // 延迟等待选中完成；AX 优先，失败用剪贴板兜底（带选中检测：无选中不误触发）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self, self.translateResultPanel != nil else { return }
+            guard let text = self.selectedTextViaAccessibility() ?? self.selectedTextViaCopyPaste(),
+                  !text.isEmpty, text != self.lastTranslatedText else { return }
+            self.lastTranslatedText = text
+            self.translateSentencesWith(text: text)
+        }
     }
 
     /// 创建或更新划词翻译浮窗（双语对照，可拖动、可调大小）
     private func updateTranslateResult(source: String, sourceLines: [String], targetLines: [String]) {
-        guard selectionState.isOpen else { return }
-        debugLog("[翻译] 更新当前请求，原文字符数=\(source.count)")
         let view = TranslateResultView(source: source,
                                        sourceLines: sourceLines,
                                        targetLines: targetLines,
                                        onClose: { [weak self] in self?.closeTranslateResult() },
                                        onReset: { [weak self] in
             (self?.translateResultPanel as? ResizableTranslatePanel)?.resetToDefaultSize()
-        },
-                                       onRetry: { [weak self] in self?.retrySelectionTranslation() })
+        })
         if let hosting = translateHostingController {
             // 复用面板：直接更新内容
             hosting.rootView = view
@@ -553,13 +393,15 @@ final class AppServices {
             centerPanel(panel, size: savedSize)
         }
         translateResultPanel = panel
-        refreshTranslateSync()   // 浮窗打开 → 启动选中监听（实时刷新内容）
-        observeClose(of: panel) { [weak self, weak panel] in
-            guard let self, let panel, self.translateResultPanel === panel else { return }
-            self.closeTranslateResult()
+        observeClose(of: panel) { [weak self] in
+            ResizableTranslatePanel.saveOrigin(panel.frame.origin)
+            self?.translateResultPanel = nil
+            self?.translateHostingController = nil
+            self?.stopTranslateSync()
         }
-        // 显示结果不激活本应用，保留源应用的选区与复制目标。
         panel.orderFrontRegardless()
+        // 关键：激活应用——NSCursor.set() 只在应用激活时有效（nonactivating 面板默认不激活）
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     /// 导入数据后刷新会话与词库（重新开始、通知词库页）
@@ -579,12 +421,6 @@ final class AppServices {
     }
 
     private func closeTranslateResult() {
-        SelectedTextReader.interruptCopy()
-        selectionState.close()
-        selectionReadTask?.cancel()
-        selectionReadTask = nil
-        selectionIsReading = false
-        lastTranslatedText = ""
         if let panel = translateResultPanel {
             ResizableTranslatePanel.saveOrigin(panel.frame.origin)
             panel.orderOut(nil)
@@ -610,6 +446,12 @@ final class AppServices {
             panel.orderOut(nil)
             translateInputPanel = nil
             return
+        }
+        // 误判恢复：按 ⌥Z 时系统可能误触发 ⌃⌥Z 关掉划词翻译——
+        // 若 0.5s 内划词翻译刚被关闭且此时打开了输入翻译 → 判定误判，恢复划词翻译
+        if now - lastTranslateSelectionCloseTime < 0.5, !lastTranslatedText.isEmpty {
+            debugLog("划词翻译疑似被误关，自动恢复")
+            translateSentencesWith(text: lastTranslatedText)
         }
         showNetworkHintIfNeeded()
         debugLog("创建输入翻译面板")
@@ -638,10 +480,7 @@ final class AppServices {
         panel.level = NSWindow.Level(NSWindow.Level.popUpMenu.rawValue + 1)
         panel.center()
         translateInputPanel = panel
-        observeClose(of: panel) { [weak self, weak panel] in
-            guard let self, let panel, self.translateInputPanel === panel else { return }
-            self.translateInputPanel = nil
-        }
+        observeClose(of: panel) { [weak self] in self?.translateInputPanel = nil }
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         debugLog("输入翻译显示 isVisible=\(panel.isVisible) frame=\(panel.frame) level=\(panel.level.rawValue)")
@@ -658,8 +497,91 @@ final class AppServices {
         if !trusted {
             let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
             AXIsProcessTrustedWithOptions(options)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                if AXIsProcessTrusted() {
+                    self?.translateSelection()
+                }
+            }
         }
         return trusted
+    }
+
+    /// 通过辅助功能 API 获取最前应用的选中文本
+    private func selectedTextViaAccessibility() -> String? {
+        guard let frontApp = NSWorkspace.shared.frontmostApplication else { return nil }
+        let appElement = AXUIElementCreateApplication(frontApp.processIdentifier)
+        var focused: CFTypeRef?
+        let err = AXUIElementCopyAttributeValue(
+            appElement, kAXFocusedUIElementAttribute as CFString, &focused)
+        guard err == .success, let focusedElement = focused else { return nil }
+        let element = focusedElement as! AXUIElement
+
+        // 优先直接读取 kAXSelectedTextAttribute
+        var selected: CFTypeRef?
+        let err2 = AXUIElementCopyAttributeValue(
+            element, kAXSelectedTextAttribute as CFString, &selected)
+        if err2 == .success, let text = selected as? String, !text.isEmpty {
+            return text
+        }
+        // 部分应用（浏览器网页等）不支持直接读选中文本，改用选中范围 + 取值
+        var range: CFTypeRef?
+        let err3 = AXUIElementCopyAttributeValue(
+            element, kAXSelectedTextRangeAttribute as CFString, &range)
+        if err3 == .success, let rangeValue = range {
+            let axValue = rangeValue as! AXValue
+            if AXValueGetType(axValue) == .cfRange {
+                var cfRange = CFRange()
+                AXValueGetValue(axValue, .cfRange, &cfRange)
+                var value: CFTypeRef?
+                let err4 = AXUIElementCopyAttributeValue(
+                    element, kAXValueAttribute as CFString, &value)
+                if err4 == .success, let text = value as? String {
+                    let start = max(0, cfRange.location)
+                    let length = max(0, cfRange.length)
+                    let nsText = text as NSString
+                    if start + length <= nsText.length {
+                        return nsText.substring(with: NSRange(location: start, length: length))
+                    }
+                }
+            }
+        }
+        return nil
+    }
+
+    /// 兜底方案：模拟 ⌘C 复制选中文本到剪贴板，读回后恢复剪贴板（兼容更多应用）
+    /// 先清空剪贴板再模拟复制：无选中时 ⌘C 无效、剪贴板保持为空 → 返回 nil（可区分"点击"与"选中"）
+    private func selectedTextViaCopyPaste() -> String? {
+        guard let source = CGEventSource(stateID: .combinedSessionState) else { return nil }
+        let pasteboard = NSPasteboard.general
+        let savedString = pasteboard.string(forType: .string)
+        let savedData = pasteboard.data(forType: .string)
+
+        // 清空剪贴板：只有真正发生复制（存在选中文本）后才会再次非空
+        pasteboard.clearContents()
+
+        // 模拟 ⌘C（virtualKey 8 = C 键）
+        let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 8, keyDown: true)
+        keyDown?.flags = .maskCommand
+        keyDown?.post(tap: .cghidEventTap)
+        let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 8, keyDown: false)
+        keyUp?.flags = .maskCommand
+        keyUp?.post(tap: .cghidEventTap)
+
+        // 等待剪贴板更新
+        Thread.sleep(forTimeInterval: 0.2)
+        let text = pasteboard.string(forType: .string)
+
+        // 恢复剪贴板
+        if let savedString {
+            pasteboard.setString(savedString, forType: .string)
+        } else if let savedData {
+            pasteboard.setData(savedData, forType: .string)
+        } else {
+            pasteboard.clearContents()
+        }
+        // 剪贴板仍为空 = 没有选中内容（⌘C 无效），不视为选中
+        guard let text, !text.isEmpty else { return nil }
+        return text
     }
 
     /// 快捷键操作目标：焦点（key window）在哪个面板就作用哪个面板
@@ -671,15 +593,12 @@ final class AppServices {
     /// 用户最后点击/激活的面板（nonactivating 窗口不成为 key，需用点击记录兜底）
     private var lastHotKeyTarget: HotKeyTarget = .study
 
-    /// 当前快捷键作用的面板：优先 key window 判断，其次面板可见性，最后最近点击
+    /// 当前快捷键作用的面板：优先 key window 判断，其次最近点击的面板
     private var hotKeyTarget: HotKeyTarget {
         if let key = NSApp.keyWindow {
             if key === quiz.window { return .quiz }
             if key === studyPanel.window || key === statusItem.popoverWindow { return .study }
         }
-        // nonactivating 面板（NSPopover 等）不成为 keyWindow：按可见性判断
-        if studyPanel.isVisible || statusItem.popoverWindow != nil { return .study }
-        if quiz.isVisible { return .quiz }
         return lastHotKeyTarget
     }
 
@@ -695,22 +614,19 @@ final class AppServices {
 
     /// 注册面板点击监听：本地（应用内）+ 全局，用于记录最近操作的面板
     func observePanelClicks() {
-        if let monitor = localPanelClickMonitor { NSEvent.removeMonitor(monitor) }
-        if let monitor = globalPanelClickMonitor { NSEvent.removeMonitor(monitor) }
-        localPanelClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+        NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
             Task { @MainActor in self?.recordClickTarget() }
             return event   // 不拦截，继续传递
         }
-        globalPanelClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+        NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             Task { @MainActor in self?.recordClickTarget() }
         }
     }
 
     /// 移动当前焦点所在的浮动面板（测试面板或 ⌥W 学习面板）
     private func movePanel(dx: CGFloat, dy: CGFloat) {
-        let target = hotKeyTarget
-        debugLog("移动: target=\(target == .quiz ? "quiz" : "study") dx=\(dx) dy=\(dy)")
-        switch target {
+        debugLog("移动: target=\(hotKeyTarget == .quiz ? "quiz" : "study") dx=\(dx) dy=\(dy)")
+        switch hotKeyTarget {
         case .quiz: quiz.nudge(dx: dx, dy: dy)
         case .study: studyPanel.nudge(dx: dx, dy: dy)
         }
@@ -729,27 +645,15 @@ final class AppServices {
         }
     }
 
-    /// 后台线程可用的文件日志（nonisolated 方法不能调 MainActor 的 debugLog）
-    nonisolated private static func fileLog(_ message: String) {
-        let line = "[\(Date())] \(message)\n"
-        guard let data = line.data(using: .utf8) else { return }
-        if let handle = FileHandle(forWritingAtPath: "/tmp/dailyword_debug.log") {
-            handle.seekToEndOfFile()
-            handle.write(data)
-            try? handle.close()
-        } else {
-            try? data.write(to: URL(fileURLWithPath: "/tmp/dailyword_debug.log"))
-        }
-    }
-
     /// 透明度快捷键按焦点分派：焦点在哪个面板就调哪个面板的透明度
     private func adjustOpacity(by delta: Double) {
-        let target = hotKeyTarget
-        debugLog("透明度: target=\(target == .quiz ? "quiz" : "study") delta=\(delta)")
-        switch target {
+        debugLog("透明度: target=\(hotKeyTarget == .quiz ? "quiz" : "study") delta=\(delta)")
+        switch hotKeyTarget {
         case .quiz: AppSettings.shared.adjustQuizOpacity(by: delta)
         case .study: AppSettings.shared.adjustStudyOpacity(by: delta)
         }
+        // 引导互动步：调了透明度即鼓励并进入下一步
+        onboardingFlow.notifyOpacityChanged()
     }
 
     /// 跳转顶层显示：激活 App 并弹出指引气泡
@@ -759,37 +663,36 @@ final class AppServices {
     }
 
     /// 独立设置窗口：避免系统颜色面板与 popover 的窗口层级冲突
-    /// 每次打开重建 hosting 视图（避免 SwiftUI AttributeGraph 状态长期复用导致偶发崩溃）
     func showSettingsWindow() {
-        settingsWindow?.orderOut(nil)
-        settingsWindow = nil
-        let view = SettingsPanelView(session: session)
-        let hosting = NSHostingView(rootView: view)
-        hosting.sizingOptions = []
-        let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 540),
-            styleMask: [.titled, .closable, .utilityWindow],
-            backing: .buffered, defer: false
-        )
-        panel.title = "设置"
-        panel.contentView = hosting
-        panel.isReleasedWhenClosed = false
-        settingsWindow = panel
+        if settingsWindow == nil {
+            let view = SettingsPanelView(session: session)
+            let hosting = NSHostingView(rootView: view)
+            hosting.sizingOptions = []
+            let panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 320, height: 540),
+                styleMask: [.titled, .closable, .utilityWindow],
+                backing: .buffered, defer: false
+            )
+            panel.title = "设置"
+            panel.contentView = hosting
+            panel.isReleasedWhenClosed = false
+            settingsWindow = panel
+        }
         // 位置：学习面板（菜单栏弹窗或 ⌥W 浮动面板）打开时，显示在其左侧；否则居中
-        let anchorWindow = studyPanel.window ?? statusItem.popoverWindow
-        let screen = anchorWindow?.screen ?? NSScreen.screens.first { $0.visibleFrame.contains(NSEvent.mouseLocation) } ?? primaryScreen
-        if let screen {
-            let vf = screen.visibleFrame
-            var origin = NSPoint(x: vf.midX - panel.frame.width / 2, y: vf.midY - panel.frame.height / 2)
-            if let anchor = anchorWindow?.frame {
-                origin = NSPoint(x: anchor.minX - panel.frame.width - 12, y: anchor.midY - panel.frame.height / 2)
-                if origin.x < vf.minX { origin.x = anchor.maxX + 12 }
+        if let window = settingsWindow {
+            if let anchor = studyPanel.panelFrame {
+                window.setFrameOrigin(NSPoint(x: anchor.minX - window.frame.width - 12,
+                                              y: anchor.midY - window.frame.height / 2))
+            } else if let popoverWin = statusItem.popoverWindow {
+                window.setFrameOrigin(NSPoint(x: popoverWin.frame.minX - window.frame.width - 12,
+                                              y: popoverWin.frame.midY - window.frame.height / 2))
+            } else {
+                window.center()
             }
-            panel.setFrame(WindowPlacement.clampedFrame(NSRect(origin: origin, size: panel.frame.size), in: vf), display: false)
-        } else { panel.center() }
-        panel.makeKeyAndOrderFront(nil)
+        }
+        settingsWindow?.makeKeyAndOrderFront(nil)
         // 仅打开时置顶（不改变常驻层级），确保不被学习面板等 floating 窗口遮挡
-        panel.orderFrontRegardless()
+        settingsWindow?.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -803,8 +706,6 @@ final class AppServices {
         isStudyOpen = open
         updateAmbientSuppression()
         if !open { ambient.refreshDueCount() }
-        // 其他窗口的开合不能新建翻译会话。
-        refreshTranslateSync()
     }
 
     private func updateAmbientSuppression() {
@@ -821,297 +722,215 @@ final class AppServices {
     }
 
     func showOnboarding() {
-        if onboardingFlow.isActive {
-            renderCoachMark(focus: true)
-            return
-        }
+        onboardingFlow.reset()
+        onboardingFlow.isActive = true
         isOnboardingOpen = true
-        onboardingDemo.state = OnboardingDemoState()
         updateAmbientSuppression()
-        installCoachObservers()
-        onboardingFlow.start(skipOnNextLaunch: UserDefaults.standard.bool(forKey: Self.hideOnboardingKey))
+        presentCoachMark()
     }
 
     private func finishOnboarding(rememberSkip: Bool) {
-        coachPresentationTask?.cancel()
-        coachAdvanceTask?.cancel()
-        coachPresentationTask = nil
-        coachAdvanceTask = nil
-        onboardingFlow.stop()
-        coachObservers.removeAll()
-        UserDefaults.standard.set(rememberSkip, forKey: Self.hideOnboardingKey)
-        coachPanel?.onDismiss = nil
-        coachPanel?.orderOut(nil)
-        coachPanel = nil
-        closeCoachWindows(except: nil)
+        if rememberSkip {
+            UserDefaults.standard.set(true, forKey: Self.hideOnboardingKey)
+        }
+        onboardingFlow.isActive = false
         isOnboardingOpen = false
         updateAmbientSuppression()
+        coachPanel?.orderOut(nil)
+        coachPanel = nil
+        // 收尾：关掉引导过程中自动打开的界面
+        quiz.hide()
+        libraryWindow?.close()
     }
 
-    private func coachSurface(for step: OnboardingFlow.Step) -> CoachSurface? {
+    /// 展示/更新当前步骤的指引气泡，并把焦点带到被指引的界面
+    private func presentCoachMark(praise: String? = nil) {
+        let step = onboardingFlow.step
+
+        // 每一步先把对应界面展开，让指引真正“手把手”；面板统一拉回主屏
         switch step {
-        case .study, .opacityDemo, .movement, .tripleClose: return .study
-        case .library: return .library
-        case .quiz: return .quiz
-        case .appearance: return .settings
-        case .rewards: return .rewards
-        default: return nil
-        }
-    }
-
-    /// 只清理由引导创建或重新显示的窗口，不关闭用户原先打开的界面。
-    private func closeCoachWindows(except surface: CoachSurface?) {
-        for (kind, window) in Array(coachOwnedWindows) where kind != surface {
-            coachOwnedWindows[kind] = nil
-            switch kind {
-            case .study, .quiz:
-                if onboardingDemoWindow === window {
-                    window.orderOut(nil)
-                    onboardingDemoWindow = nil
-                }
-            case .library:
-                if libraryWindow === window { window.close() }
-            case .settings:
-                window.orderOut(nil)
-            case .rewards:
-                window.close()
-                if onboardingRewardsWindow === window { onboardingRewardsWindow = nil }
+        case .welcome, .menubar:
+            studyPanel.hide()
+            quiz.hide()
+            libraryWindow?.close()
+        case .study:
+            quiz.hide()
+            libraryWindow?.close()
+            studyPanel.show()
+            studyPanel.ensureOnPrimaryScreen()
+        case .library:
+            studyPanel.hide()
+            quiz.hide()
+            showLibrary()
+        case .quiz:
+            libraryWindow?.close()
+            studyPanel.hide()
+            quiz.show()
+            quiz.ensureOnPrimaryScreen()
+        case .appearance:
+            quiz.hide()
+            studyPanel.show()
+            studyPanel.ensureOnPrimaryScreen()
+            // 稍等面板就绪后自动弹开设置
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                NotificationCenter.default.post(name: .openStudySettings, object: nil)
             }
-        }
-    }
-
-    private func showOnboardingDemo(isQuiz: Bool) {
-        if let window = onboardingDemoWindow { window.makeKeyAndOrderFront(nil); return }
-        // 练习演示尺寸随字号同正式浮层公式；背单词演示与学习面板一致。
-        let quizFont = AppSettings.shared.quizFontSize
-        let contentSize = isQuiz
-            ? NSSize(width: min(720, max(440, 260 + quizFont * 11)), height: 118 + quizFont * 3.4 + 56)
-            : NSSize(width: 340, height: 470)
-        let panel = KeyablePanel(contentRect: NSRect(origin: .zero, size: contentSize),
-                                 styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        panel.isReleasedWhenClosed = false
-        panel.isFloatingPanel = true
-        panel.level = .floating
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hidesOnDeactivate = false
-        panel.isMovableByWindowBackground = true
-        let hosting = NSHostingView(rootView: OnboardingDemoView(model: onboardingDemo, flow: onboardingFlow, isQuiz: isQuiz) { [weak self, weak panel] triple in
-            guard let self, let panel, self.onboardingDemoWindow === panel else { return }
-            self.closeOnboardingDemo()
-            if triple && !isQuiz { self.onboardingFlow.notifyTripleClosed() }
-        })
-        hosting.sizingOptions = []
-        hosting.frame.size = contentSize
-        panel.contentView = hosting
-        panel.center()
-        onboardingDemoWindow = panel
-        panel.makeKeyAndOrderFront(nil)
-    }
-
-    private func closeOnboardingDemo() {
-        onboardingDemoWindow?.orderOut(nil)
-        onboardingDemoWindow = nil
-        renderCoachMark()
-    }
-
-    /// 教程窗口获得焦点时，常用快捷键只操作演示，不影响真实学习和持久化设置。
-    private func performOnboardingAction(_ action: HotKeyAction) -> Bool {
-        guard onboardingFlow.isActive, let window = onboardingDemoWindow, window.isVisible,
-              NSApp.keyWindow === window || NSApp.keyWindow === coachPanel else { return false }
-        switch action {
-        case .revealWord: onboardingDemo.state.flip()
-        case .speak: SpeechService.shared.speak(OnboardingDemoState.word)
-        case .togglePanel, .toggleQuiz: closeOnboardingDemo()
-        case .opacityUp, .opacityDown:
-            if onboardingDemo.state.adjustOpacity(action == .opacityUp ? 0.08 : -0.08) {
-                onboardingFlow.notifyOpacityChanged()
-            }
-        case .panelLeft, .panelRight, .panelUp, .panelDown:
-            let dx: CGFloat = action == .panelLeft ? -24 : (action == .panelRight ? 24 : 0)
-            let dy: CGFloat = action == .panelDown ? -24 : (action == .panelUp ? 24 : 0)
-            let frame = window.frame
-            let desired = frame.offsetBy(dx: dx, dy: dy)
-            let next = window.screen.map { WindowPlacement.clampedFrame(desired, in: $0.visibleFrame) } ?? desired
-            window.setFrame(next, display: true)
-            if frame != next { onboardingFlow.notifyPanelMoved() }
-        case .showWordDetail:
-            return true   // 示例不是词库记录，不能跳到当前真实学习词的详情。
-        default: return false
-        }
-        return true
-    }
-
-    /// 切步时才展示目标；迟到的展示任务与自动推进都必须匹配当前步骤令牌。
-    private func prepareOnboardingStep() {
-        guard onboardingFlow.isActive else { return }
-        coachPresentationTask?.cancel()
-        coachAdvanceTask?.cancel()
-        let token = onboardingFlow.revision
-        let surface = coachSurface(for: onboardingFlow.step)
-        closeCoachWindows(except: surface)
-        let before = coachTargetWindow
-        let wasVisible = before?.isVisible == true
-        switch surface {
-        case .study, .quiz: showOnboardingDemo(isQuiz: surface == .quiz)
-        case .library: showLibrary()
-        case .settings:
-            if let settingsWindow, settingsWindow.isVisible {
-                settingsWindow.makeKeyAndOrderFront(nil)
-            } else {
-                showSettingsWindow()
+        case .opacityDemo, .tripleClose:
+            quiz.hide()
+            libraryWindow?.close()
+            studyPanel.show()
+            studyPanel.ensureOnPrimaryScreen()
+            // 收起上一步可能打开的设置/奖励弹窗，让用户专注互动
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                NotificationCenter.default.post(name: .closeStudyPopovers, object: nil)
             }
         case .rewards:
-            if onboardingRewardsWindow == nil {
-                let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 360, height: 520),
-                                    styleMask: [.titled, .closable, .utilityWindow], backing: .buffered, defer: false)
-                panel.title = "学习成就 · 引导预览"
-                panel.isReleasedWhenClosed = false
-                // RewardsPanel 根部是贪婪 ScrollView、理想尺寸极小，contentViewController 的
-                // 自动尺寸联动会把窗口缩成标题条；改用 NSHostingView 固定内容尺寸（同演示面板）。
-                let hosting = NSHostingView(rootView: RewardsPanel(summary: (try? database.rewardSummary()) ?? .empty))
-                hosting.sizingOptions = []
-                hosting.frame = NSRect(x: 0, y: 0, width: 360, height: 520)
-                panel.contentView = hosting
-                panel.center()
-                onboardingRewardsWindow = panel
+            studyPanel.show()
+            studyPanel.ensureOnPrimaryScreen()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                NotificationCenter.default.post(name: .openStudyRewards, object: nil)
             }
-            onboardingRewardsWindow?.makeKeyAndOrderFront(nil)
-        case nil: break   // 翻译、游戏、备份仅说明，不调用带副作用的功能。
         }
-        if let surface, let window = coachTargetWindow, !wasVisible || before !== window {
-            coachOwnedWindows[surface] = window
-        }
-        coachPresentationTask = Task { @MainActor [weak self] in
-            do { try await Task.sleep(nanoseconds: 150_000_000) } catch { return }
-            guard let self, self.onboardingFlow.progress.accepts(token) else { return }
-            self.renderCoachMark(focus: true)
-        }
-    }
 
-    /// 更新内容和位置，不重新打开目标、不重置学习/练习状态。
-    private func renderCoachMark(focus: Bool = false) {
-        guard onboardingFlow.isActive else { return }
-        let step = onboardingFlow.step
-        let token = onboardingFlow.revision
-
-        let target = coachTargetWindow
-        coachLastTargetWindow = target
-        let anchor = step == .menubar ? statusItem.buttonScreenFrame
-            : (target?.isVisible == true ? target?.frame : nil)
-        let screen = anchor.flatMap { frame in NSScreen.screens.first { $0.frame.contains(NSPoint(x: frame.midX, y: frame.midY)) } }
-            ?? coachPanel?.screen ?? primaryScreen
-        guard let screen else { return }
-        let vf = screen.visibleFrame
-        let cardWidth = min(360, max(180, vf.width - 44))
-        let contentHeight = min(260, max(60, vf.height - 250))
-        var view = CoachMarkView(
-            step: step, arrow: .none, flow: onboardingFlow,
-            cardWidth: cardWidth, contentHeight: contentHeight, statusMessage: coachStatusMessage,
+        let arrow = coachArrow(for: step)
+        // 菜单栏步：箭头需水平对准图标（气泡被屏边限制时箭头单独偏移）
+        var arrowXOffset: CGFloat = 0
+        if step == .menubar, let vf = primaryScreen?.visibleFrame,
+           let targetMid = menubarTargetMidX() {
+            let width = estimatedCoachWidth(for: step)
+            let bubbleX = min(max(vf.minX + 8, targetMid - width / 2), vf.maxX - width - 8)
+            let rawOffset = targetMid - (bubbleX + width / 2)
+            arrowXOffset = max(-(width / 2 - 24), min(width / 2 - 24, rawOffset))
+        }
+        let view = CoachMarkView(
+            step: step,
+            arrow: arrow,
+            arrowXOffset: arrowXOffset,
+            praise: praise,
+            stepIndex: step.rawValue,
+            totalSteps: OnboardingFlow.Step.allCases.count,
             onNext: { [weak self] in
-                guard let self, self.onboardingFlow.progress.accepts(token) else { return }
-                if step == .complete { self.finishOnboarding(rememberSkip: true) }
-                else { self.onboardingFlow.advance(ifCurrent: token) }
+                guard let self else { return }
+                if step == OnboardingFlow.Step.allCases.last {
+                    self.finishOnboarding(rememberSkip: true)
+                } else {
+                    self.onboardingFlow.advance()
+                }
             },
-            onBack: { [weak self] in
-                guard let self, self.onboardingFlow.progress.accepts(token) else { return }
-                self.onboardingFlow.back()
-            },
-            onSkip: { [weak self] in
-                guard let self, self.onboardingFlow.progress.accepts(token) else { return }
-                self.finishOnboarding(rememberSkip: self.onboardingFlow.skipOnNextLaunch)
-            },
-            onShowTarget: coachSurface(for: step) == nil || onboardingFlow.celebrating ? nil : { [weak self] in
-                guard let self, self.onboardingFlow.progress.accepts(token), !self.onboardingFlow.celebrating else { return }
-                self.prepareOnboardingStep()
-            }
+            onBack: { [weak self] in self?.onboardingFlow.back() },
+            onSkip: { [weak self] in self?.finishOnboarding(rememberSkip: true) }
         )
+
         let hosting = NSHostingView(rootView: view)
         hosting.sizingOptions = []
-        var size = hosting.fittingSize
-        // 保险：贪婪容器可能让 fittingSize 退化为 0，零尺寸面板会让渲染内容盖住目标窗口。
-        if size.width < 40 || size.height < 40 {
-            size = CGSize(width: cardWidth + 28, height: contentHeight + 210)
-        }
-        let placement = OnboardingPlacement.resolve(anchor: anchor, visibleFrame: vf,
-                                                     size: size, preferBelow: step == .menubar)
-        view = CoachMarkView(step: step, arrow: placement.arrow, arrowOffset: placement.arrowOffset,
-                             flow: onboardingFlow, cardWidth: cardWidth, contentHeight: contentHeight,
-                             statusMessage: coachStatusMessage, onNext: view.onNext, onBack: view.onBack,
-                             onSkip: view.onSkip, onShowTarget: view.onShowTarget)
-        hosting.rootView = view
-        hosting.frame.size = size
+        hosting.frame.size = hosting.fittingSize
 
-        let panel = coachPanel ?? CoachMarkPanel(contentRect: NSRect(origin: .zero, size: size),
-                                                 styleMask: [.borderless, .nonactivatingPanel],
-                                                 backing: .buffered, defer: false)
-        panel.isReleasedWhenClosed = false
-        panel.isFloatingPanel = true
-        panel.level = .statusBar
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = false
-        panel.hidesOnDeactivate = false
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.onDismiss = { [weak self] in
-            guard let self else { return }
-            self.finishOnboarding(rememberSkip: self.onboardingFlow.skipOnNextLaunch)
+        let panel: NSPanel
+        if let existing = coachPanel {
+            panel = existing
+            panel.contentView = hosting
+            panel.setContentSize(hosting.frame.size)
+        } else {
+            panel = NSPanel(
+                contentRect: NSRect(origin: .zero, size: hosting.frame.size),
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered, defer: false
+            )
+            panel.contentView = hosting
+            panel.isFloatingPanel = true
+            panel.level = .statusBar
+            panel.isOpaque = false
+            panel.backgroundColor = .clear
+            panel.hasShadow = false
+            panel.hidesOnDeactivate = false
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            coachPanel = panel
         }
-        panel.contentView = hosting
-        panel.setContentSize(size)
-        panel.setFrameOrigin(placement.origin)
-        debugLog("引导气泡 step=\(step.rawValue) anchor=\(anchor.map { "\($0.origin) \($0.size)" } ?? "nil") card=\(size.width)x\(size.height) arrow=\(placement.arrow) origin=\(placement.origin)")
-        coachPanel = panel
+
+        panel.setFrameOrigin(coachOrigin(for: step, size: panel.frame.size, arrow: arrow))
         panel.orderFrontRegardless()
-        if focus {
-            NSApp.activate(ignoringOtherApps: true)
-            if let target, target.isVisible { target.makeKey() }
-            else { panel.makeKey() }
-        }
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKey()
     }
 
-    /// 其他功能首次展示仍使用主屏；引导则跟随真实目标所在屏幕。
+    /// 引导使用的屏幕：固定主屏（外接副屏时不会飘到副屏）
     private var primaryScreen: NSScreen? { NSScreen.screens.first }
 
-    private var coachTargetWindow: NSWindow? {
-        switch coachSurface(for: onboardingFlow.step) {
-        case .study, .quiz: return onboardingDemoWindow
-        case .library: return libraryWindow
-        case .settings: return settingsWindow
-        case .rewards: return onboardingRewardsWindow
-        case nil: return nil
+    /// 估算气泡宽度（含内边距），用于在创建视图前先判断箭头方向
+    private func estimatedCoachWidth(for step: OnboardingFlow.Step) -> CGFloat {
+        (step == .welcome ? 330 : 268) + 22
+    }
+
+    /// 箭头方向：根据气泡实际会落在锚点哪一侧决定，保证箭头永远指向目标
+    private func coachArrow(for step: OnboardingFlow.Step) -> OnboardingFlow.ArrowDirection {
+        guard let vf = primaryScreen?.visibleFrame else { return .none }
+
+        func sideArrow(_ anchor: NSRect?) -> OnboardingFlow.ArrowDirection {
+            guard let anchor else { return .none }
+            let width = estimatedCoachWidth(for: step)
+            // 能放左侧 → 气泡在目标左边，箭头指右；否则气泡在右，箭头指左
+            return anchor.minX - width - 14 >= vf.minX + 12 ? .right : .left
+        }
+
+        switch step {
+        case .welcome: return .none
+        case .menubar: return .up
+        case .study, .appearance, .rewards, .opacityDemo, .tripleClose:
+            return sideArrow(studyPanel.panelFrame)
+        case .library: return sideArrow(libraryWindow?.frame)
+        case .quiz: return sideArrow(quiz.panelFrame)
         }
     }
 
-    private var coachStatusMessage: String? {
-        if onboardingFlow.celebrating { return nil }
-        if coachSurface(for: onboardingFlow.step) != nil, coachTargetWindow?.isVisible != true {
-            return "本步界面已关闭，可重新显示，或直接继续引导。"
+    /// 菜单栏图标在主屏菜单栏上的水平中心：
+    /// 图标可能被取到副屏坐标（每块屏都有菜单栏），按“距右侧边缘的距离”映射回主屏
+    private func menubarTargetMidX() -> CGFloat? {
+        guard let iconFrame = statusItem.buttonScreenFrame,
+              let primary = primaryScreen else { return nil }
+        guard let iconScreen = NSScreen.screens.first(where: { $0.frame.intersects(iconFrame) }),
+              iconScreen != primary else {
+            return iconFrame.midX   // 本来就在主屏
         }
-        if onboardingFlow.step == .menubar, statusItem.buttonScreenFrame == nil {
-            return "暂未定位到菜单栏图标，可从设置重看引导。"
-        }
-        return nil
+        let distanceFromRight = iconScreen.frame.maxX - iconFrame.midX
+        return primary.frame.maxX - distanceFromRight
     }
 
-    private func installCoachObservers() {
-        coachObservers.removeAll()
-        for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification, NSWindow.willCloseNotification,
-                     NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification] {
-            NotificationCenter.default.publisher(for: name)
-                .receive(on: RunLoop.main)
-                .sink { [weak self] note in
-                    guard let self, self.onboardingFlow.isActive,
-                          let window = note.object as? NSWindow,
-                          window === self.coachLastTargetWindow || window === self.coachTargetWindow else { return }
-                    self.renderCoachMark()
-                }
-                .store(in: &coachObservers)
+    /// 气泡位置：贴近当前步骤要指引的元素（均限制在主屏内）
+    private func coachOrigin(for step: OnboardingFlow.Step, size: NSSize,
+                             arrow: OnboardingFlow.ArrowDirection) -> NSPoint {
+        guard let screen = primaryScreen else { return .zero }
+        let vf = screen.visibleFrame
+
+        func besides(_ anchor: NSRect?) -> NSPoint {
+            guard let anchor else {
+                return NSPoint(x: vf.midX - size.width / 2, y: vf.midY)
+            }
+            let x: CGFloat = arrow == .right
+                ? anchor.minX - size.width - 6
+                : min(anchor.maxX + 6, vf.maxX - size.width - 12)
+            let y = min(max(vf.minY + 12, anchor.maxY - size.height), vf.maxY - size.height - 12)
+            return NSPoint(x: max(vf.minX + 12, x), y: y)
         }
-        NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.renderCoachMark() }
-            .store(in: &coachObservers)
+
+        switch step {
+        case .welcome:
+            // 主屏正中间：先告知用户入口在菜单栏
+            return NSPoint(x: vf.midX - size.width / 2, y: vf.midY - size.height / 2)
+        case .menubar:
+            // 图标位置映射到主屏后居中对齐（箭头另有水平偏移兼顾贴边情况）
+            if let targetMid = menubarTargetMidX() {
+                let x = min(max(vf.minX + 8, targetMid - size.width / 2),
+                            vf.maxX - size.width - 8)
+                return NSPoint(x: x, y: vf.maxY - size.height - 4)
+            }
+            return NSPoint(x: vf.maxX - size.width - 30, y: vf.maxY - size.height - 6)
+        case .study, .appearance, .rewards, .opacityDemo, .tripleClose:
+            return besides(studyPanel.panelFrame)
+        case .library:
+            return besides(libraryWindow?.frame)
+        case .quiz:
+            return besides(quiz.panelFrame)
+        }
     }
 
     // MARK: - 词详情
@@ -1147,10 +966,12 @@ final class AppServices {
         panel.center()
         wordDetailWindow = panel
         wordDetailHeadword = item.word.headword
-        observeClose(of: panel) { [weak self, weak panel] in
-            guard let self, let panel, self.wordDetailWindow === panel else { return }
-            self.wordDetailWindow = nil
-            self.wordDetailHeadword = nil
+        observeClose(of: panel) { [weak self] in
+            // 仅当关闭的是当前记录窗口时清空（避免误清其他窗口的引用）
+            if self?.wordDetailWindow === panel {
+                self?.wordDetailWindow = nil
+                self?.wordDetailHeadword = nil
+            }
             WordDetailState.shared.headword = nil
         }
         NSApp.activate(ignoringOtherApps: true)
@@ -1187,9 +1008,8 @@ final class AppServices {
             window.center()
         }
         libraryWindow = window
-        observeClose(of: window) { [weak self, weak window] in
-            guard let self, let window, self.libraryWindow === window else { return }
-            self.libraryWindow = nil
+        observeClose(of: window) { [weak self] in
+            self?.libraryWindow = nil
         }
 
         NSApp.activate(ignoringOtherApps: true)
@@ -1202,9 +1022,8 @@ final class AppServices {
 
     /// 启动时后台预热修仙塔词库（避免首次进入游戏/继续修仙路卡顿）
     private func prewarmTowerPool() {
-        let db = database
         Task.detached(priority: .utility) { [weak self] in
-            guard let self else { return }
+            guard let self, let db = self.database as? AppDatabase else { return }
             let items = (try? db.allItems()) ?? []
             let sorted = items.sorted { a, b in
                 let sa = a.card != nil ? 0 : 1
@@ -1224,10 +1043,8 @@ final class AppServices {
                     catWords[category.id, default: []].append(word)
                 }
             }
-            let snapshotCounts = counts
-            let snapshotWords = catWords
             await MainActor.run {
-                self.towerEngine.injectPool(words, counts: snapshotCounts, categoryWords: snapshotWords)
+                self.towerEngine.injectPool(words, counts: counts, categoryWords: catWords)
             }
         }
     }
@@ -1266,12 +1083,11 @@ final class AppServices {
         gameWindow = window
         isGameOpen = true
         updateAmbientSuppression()
-        observeClose(of: window) { [weak self, weak window] in
-            guard let self, let window, self.gameWindow === window else { return }
-            self.towerEngine.pauseBattleTimer()
-            self.gameWindow = nil
-            self.isGameOpen = false
-            self.updateAmbientSuppression()
+        observeClose(of: window) { [weak self] in
+            self?.towerEngine.pauseBattleTimer()
+            self?.gameWindow = nil
+            self?.isGameOpen = false
+            self?.updateAmbientSuppression()
         }
 
         NSApp.activate(ignoringOtherApps: true)
@@ -1325,7 +1141,7 @@ final class AppServices {
             panel.allowedContentTypes = [.json]
             guard panel.runModal() == .OK, let url = panel.url else { return }
             do {
-                try data.write(to: url, options: .atomic)
+                try data.write(to: url)
                 debugLog("导出成功: \(url.path)")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                     self?.showInfoAlert(title: "导出成功", message: "数据已保存到 \(url.lastPathComponent)")
@@ -1371,28 +1187,27 @@ final class AppServices {
             let data = try Data(contentsOf: url)
             let imported = try DataTransferManager.shared.importData(data)
             if imported.contains("设置") {
+                let oldKey = AppSettings.shared.currentCollectionKey
                 AppSettings.shared.reloadFromDefaults()
                 registerHotKeys()
-                session.collectionKey = AppSettings.shared.currentCollectionKey
-                let limit = UserDefaults.standard.object(forKey: Self.dailyNewLimitKey) as? Int ?? 20
-                session.updateDailyNewLimit(limit)
-                NotificationCenter.default.post(name: .collectionDidChange, object: nil)
+                if AppSettings.shared.currentCollectionKey != oldKey {
+                    session.collectionKey = AppSettings.shared.currentCollectionKey
+                    session.start()
+                    quiz.engine.reloadPool()
+                }
                 ambient.checkNow()
-            } else {
-                refreshAfterImport()
             }
-            quiz.engine.reloadPool()
+            refreshAfterImport()
             var message = imported.isEmpty ? "文件为空或格式不符" : "已导入：" + imported.joined(separator: "、")
             if imported.contains("游戏进度") {
                 message += "\n游戏进度将在重启应用后完全生效"
             }
-            if imported.contains("目标与自我激励") && !imported.contains(where: { $0.hasPrefix("词库熟练度与成就") }) {
+            if imported.contains("目标与自我激励") && !imported.contains("词库熟练度与成就") {
                 message += "\n提示：等级/经验/成就进度来自词库熟练度与成就数据（复习记录），需同时导入该项才能完整恢复"
             }
             showInfoAlert(title: "导入成功", message: message)
         } catch {
-            debugLog("[导入] 失败，未应用本次备份：\(error)")
-            showInfoAlert(title: "导入失败", message: (error as? BackupError)?.localizedDescription ?? "文件格式不正确、词库不匹配或数据损坏。本次导入未写入。")
+            showInfoAlert(title: "导入失败", message: "文件格式不正确或数据损坏")
         }
     }
 
@@ -1538,7 +1353,10 @@ final class AppServices {
     }
 
     private func observeClose(of window: NSWindow, handler: @escaping @MainActor () -> Void) {
-        let observation = WindowCloseObservation(window: window, handler: handler)
-        objc_setAssociatedObject(window, &Self.closeObservationKey, observation, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: .main
+        ) { _ in
+            Task { @MainActor in handler() }
+        }
     }
 }

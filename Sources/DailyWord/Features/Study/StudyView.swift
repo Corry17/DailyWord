@@ -83,6 +83,8 @@ struct StudyView: View {
         } else {
             AppServices.shared.statusItem.closePopover()
         }
+        // 引导互动步：三连击关闭即鼓励并进入下一步
+        AppServices.shared.onboardingFlow.notifyTripleClosed()
     }
 
     private func reloadRewards() {
@@ -344,9 +346,10 @@ struct StudyView: View {
         .padding(10)
     }
 
-    /// 正式学习自评；教程由独立演示状态处理，不监听真实作答。
+    /// 自评并通知引导流程（引导第 3 步：完成一次自评即鼓励并进入下一步）
     private func rate(_ rating: Rating) {
         session.rate(rating)
+        AppServices.shared.onboardingFlow.notifyStudyRated()
     }
 
     private var speakButton: some View {
@@ -401,7 +404,7 @@ private struct CardView: View {
                     definitionScroll(alignment: .leading)
                         .transition(.opacity)
                 } else {
-                    hintText("回忆词义 · \(revealHint)查看答案，再按隐藏")
+                    hintText("回忆词义 · 空格查看答案，再按隐藏")
                 }
             } else {
                 definitionScroll(alignment: .center)
@@ -410,7 +413,7 @@ private struct CardView: View {
                         .transition(.opacity)
                     phoneticText
                 } else {
-                    hintText("回忆英文单词 · \(revealHint)显示并发音，再按隐藏")
+                    hintText("回忆英文单词 · 空格显示并发音，再按隐藏")
                 }
             }
         }
@@ -461,11 +464,6 @@ private struct CardView: View {
         .padding(.horizontal, 20)
     }
 
-    private var revealHint: String {
-        let binding = settings.hotKeys[.revealWord] ?? .none
-        return binding.isSet ? "\(binding.label) " : "点击按钮"
-    }
-
     private func hintText(_ text: String) -> some View {
         Text(text)
             .font(.caption)
@@ -491,8 +489,7 @@ struct BindingShortcut: ViewModifier {
 
 // MARK: - 自评按钮
 
-/// 五档自评按钮（标题+数字键）；引导演示面板复用同一样式以保持界面一致。
-struct RatingButton: View {
+private struct RatingButton: View {
     let title: String
     let key: Character
     let tint: Color

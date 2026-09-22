@@ -27,7 +27,59 @@ final class WordMemoryService {
     ]
 
     /// 词根：词根 -> 含义
-    private let roots = WordRootCatalog.meanings
+    private let roots: [String: String] = [
+        "act": "做/行动", "aud": "听", "vis": "看", "vid": "看", "spect": "看",
+        "dict": "说/断言", "dic": "说", "duce": "引导", "duct": "引导", "duc": "引导",
+        "fac": "做/制作", "fact": "做/事实", "fect": "做", "fic": "做",
+        "fer": "带/运载", "form": "形状/形成", "fort": "强壮", "gen": "产生/起源",
+        "graph": "写/画/记录", "ject": "投掷", "join": "连接", "junct": "连接",
+        "lect": "选择/读", "leg": "法律/选择", "log": "说话/学科", "man": "手",
+        "manu": "手", "mand": "命令", "mem": "记忆", "mit": "送/发射", "miss": "送/发射",
+        "mot": "移动", "mov": "移动", "mob": "移动", "mut": "变化",
+        "nounce": "宣布", "nunci": "宣布", "pend": "悬挂/花费", "pens": "悬挂/衡量",
+        "pel": "推/驱赶", "puls": "推/驱赶", "phon": "声音", "photo": "光",
+        "plic": "折叠/重叠", "ply": "折叠/运用", "port": "搬运/港口", "pos": "放置",
+        "posit": "放置", "press": "压", "quest": "寻求/询问", "quir": "寻求",
+        "rupt": "破裂", "scrib": "写", "script": "写", "sequ": "跟随", "secut": "跟随",
+        "sens": "感觉", "sent": "感觉", "serv": "服务/保持", "sign": "标记/签署",
+        "sist": "站立/坚持", "solv": "解开/解决", "solut": "解开/解决", "spir": "呼吸/精神",
+        "sta": "站立/静止", "stat": "站立/状态", "struct": "建造/结构",
+        "tain": "拿住/保持", "ten": "拿住/保持", "tent": "拿住/伸展", "tend": "伸展/趋向",
+        "tens": "伸展", "term": "界限/末端", "test": "证据/测试", "tort": "扭曲",
+        "tract": "拉/拖", "trib": "给予/分配", "trud": "推/冲", "trus": "推",
+        "vac": "空", "van": "空/无", "void": "空/无", "ven": "来", "vent": "来",
+        "ver": "真实", "vers": "转/翻转", "vert": "转/翻转", "vit": "生命",
+        "viv": "生命/活", "voc": "声音/呼喊", "vok": "声音/呼喊", "vol": "意志/愿望",
+        "volv": "卷/滚动", "volut": "卷/滚动", "val": "价值/强壮", "valu": "价值",
+        "vari": "变化", "verb": "词语", "via": "道路", "vict": "征服/胜利",
+        "vinc": "征服", "cede": "走/让步", "ceed": "走/前进", "cess": "走/前进",
+        "ceive": "拿/接受", "cept": "拿/接受", "cide": "切/杀", "cis": "切",
+        "claim": "喊/主张", "clam": "喊/叫", "clud": "关闭", "clus": "关闭",
+        "cred": "相信", "cur": "跑/流", "curs": "跑", "curr": "跑",
+        "flect": "弯曲", "flex": "弯曲", "flu": "流动", "flux": "流动",
+        "grad": "走/等级", "gress": "走/前进", "nov": "新", "path": "感情/疾病",
+        "pathy": "感情/疗法", "prim": "第一/首要", "reg": "统治/规则", "rect": "直/正确",
+        "sci": "知道", "sec": "切/跟随", "sect": "切", "sed": "坐", "sess": "坐",
+        "spec": "看/外观", "stal": "站立", "stell": "星", "string": "拉紧/弦",
+        "strict": "拉紧/严格", "suade": "劝说", "surg": "升起/上升", "surge": "升起",
+        "tact": "接触", "tang": "接触", "tempor": "时间", "text": "编织/文本",
+        "the": "神", "theo": "神", "therm": "热", "toler": "容忍", "tomb": "坟墓",
+        "top": "地方/位置", "torn": "转", "tour": "转/旅游", "tox": "毒",
+        "trophy": "营养", "turb": "搅动/混乱", "typ": "类型/打印",
+        "ult": "最后", "umber": "阴影", "umbra": "阴影", "un": "一/联合",
+        "ur": "城市", "urb": "城市", "us": "使用", "util": "使用/有用",
+        "vad": "走/前进", "vas": "走/管道", "vail": "价值/力量",
+        "vapor": "蒸汽", "vect": "运送", "veg": "活力/生长",
+        "vehicle": "车辆/载体", "velop": "包/裹", "ventil": "风/通风",
+        "verg": "倾斜/转向",
+        "vest": "穿衣/授予", "vi": "道路", "vig": "活力",
+        "vir": "男人/力量", "virt": "美德/力量", "viscer": "内脏/深处",
+        "vocab": "词汇", "volcan": "火山", "vor": "吃",
+        "vot": "发誓/投票", "vulg": "大众/普通", "vulner": "伤害", "waft": "飘",
+        "weld": "焊接", "wis": "知道/智慧", "wit": "知道/智慧", "wonder": "惊奇",
+        "work": "工作", "world": "世界", "worth": "价值", "xen": "陌生/外来",
+        "xyl": "木头", "yield": "产生/屈服", "zoo": "动物",
+    ]
 
     /// 后缀：(后缀, 含义)
     private let suffixes: [(String, String)] = [
@@ -1962,41 +2014,6 @@ final class WordMemoryService {
     }
 
     // MARK: - 词形变化
-
-    /// 词根拆解（供词根拆解题型出题）：返回碎片列表与完整词
-    func rootPuzzle(for word: String) -> ([String], String)? {
-        let w = word.lowercased()
-        guard w.count >= 3 else { return nil }
-        // 整词即词根
-        if let root = roots[w] {
-            return (["\(w)"], w)
-        }
-        // 前缀 + 词根
-        for (pre, _) in prefixes where w.hasPrefix(pre) {
-            let rest = String(w.dropFirst(pre.count))
-            if let r = roots[rest], rest.count >= 2 {
-                return ([pre, rest], w)
-            }
-        }
-        // 词根 + 后缀
-        for (suf, _) in suffixes where w.hasSuffix(suf) {
-            let rest = String(w.dropLast(suf.count))
-            if let r = roots[rest], rest.count >= 2 {
-                return ([rest, suf], w)
-            }
-        }
-        // 前缀 + 词根 + 后缀
-        for (pre, _) in prefixes where w.hasPrefix(pre) {
-            let mid = String(w.dropFirst(pre.count))
-            for (suf, _) in suffixes where mid.hasSuffix(suf) {
-                let rest = String(mid.dropLast(suf.count))
-                if let r = roots[rest], rest.count >= 2 {
-                    return ([pre, rest, suf], w)
-                }
-            }
-        }
-        return nil
-    }
 
     /// 解析 ECDICT exchange 字段（p:过去式/d:过去分词/i:现在分词/3:三单/r:比较级/t:最高级/0:复数/1:原型）
     func exchangeText(_ raw: String?) -> String? {

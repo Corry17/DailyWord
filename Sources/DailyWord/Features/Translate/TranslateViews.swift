@@ -1,6 +1,5 @@
 import SwiftUI
 import AppKit
-import DailyWordCore
 
 /// 拉伸光标集合（边缘/四角）
 enum ResizeCursors {
@@ -597,7 +596,6 @@ struct TranslateResultView: View {
     let targetLines: [String]
     var onClose: () -> Void
     var onReset: (() -> Void)?
-    var onRetry: (() -> Void)?
 
     @State private var selectedSourceLine: Int?
     @State private var selectedTargetLine: Int?
@@ -609,14 +607,6 @@ struct TranslateResultView: View {
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.secondary)
                 Spacer()
-                // 重新识别当前选中（模拟 ⌘C 兜底：AX 不支持的应用如 IDE/PDF 使用）
-                Button(action: { onRetry?() }) {
-                    Image(systemName: "arrow.clockwise.circle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
-                .buttonStyle(.plain)
-                .help("重新识别当前选中的文本")
                 // 重置为初始大小
                 Button(action: { onReset?() }) {
                     Image(systemName: "arrow.counterclockwise.circle.fill")
@@ -717,8 +707,6 @@ struct TranslateInputView: View {
     @State private var text = ""
     @State private var result: String?
     @State private var translating = false
-    @State private var activeRequest: TranslationRequest?
-    @State private var requestText = ""
     var onClose: () -> Void
     /// 内容尺寸变化通知（有结果时面板变高）
     var onSizeChange: ((CGSize) -> Void)?
@@ -767,13 +755,6 @@ struct TranslateInputView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(.separator, lineWidth: 0.5)
         )
-        .onChange(of: text) { value in
-            guard value.trimmingCharacters(in: .whitespacesAndNewlines) != requestText else { return }
-            activeRequest?.cancel()
-            if translating { result = "输入已更改，按回车重新翻译" }
-            translating = false
-        }
-        .onDisappear { activeRequest?.cancel() }
         .onChange(of: result != nil) { hasResult in
             onSizeChange?(CGSize(width: 380, height: hasResult ? 320 : 140))
         }
@@ -784,23 +765,27 @@ struct TranslateInputView: View {
     private func doTranslate() {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        activeRequest?.cancel()
-        let request = TranslationRequest()
-        activeRequest = request
-        requestText = trimmed
         translating = true
-        result = "翻译中…"
-        DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
-            guard activeRequest === request, !request.isCancelled, translating else { return }
-            request.cancel()
-            result = "翻译超时，请检查网络后重试"
-            translating = false
+        result = "翻译中…"   // 先显示占位（原文已在输入框上方）
+        var finished = false
+        // 3 秒时限：无结果则报问题（翻译完成仍会更新）
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.0) { [self] in
+            guard !finished else { return }
+            self.result = "翻译超时，请检查网络后重试"
+            self.translating = false
         }
-        TranslationService.shared.translate(trimmed, request: request) { translated, error in
+        TranslationService.shared.translate(trimmed) { [self] translated, error in
             DispatchQueue.main.async {
-                guard activeRequest === request, !request.isCancelled else { return }
-                result = translated ?? (error == .noNetwork ? "网络未连接，请检查网络后重试" : "翻译失败，请重试")
-                translating = false
+                guard !finished else { return }
+                finished = true
+                if let translated, !translated.isEmpty {
+                    self.result = translated
+                } else {
+                    self.result = (error == .noNetwork)
+                        ? "网络未连接，请检查网络后重试"
+                        : "翻译失败，请重试"
+                }
+                self.translating = false
             }
         }
     }

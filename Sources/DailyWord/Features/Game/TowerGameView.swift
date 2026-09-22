@@ -10,8 +10,6 @@ struct TowerGameView: View {
     @State private var showTowerAchievements = false
     @State private var showCrippleConfirm = false
     @State private var showAbandonConfirm = false
-    /// 词义连线：当前选中的词（等待选释义）
-    @State private var selectedMatchWord: String?
 
     var body: some View {
         ZStack {
@@ -77,11 +75,11 @@ struct TowerGameView: View {
                         Image(systemName: "figure.run")
                             .font(.largeTitle)
                             .foregroundStyle(.orange)
-                        Text("确认撤退？").font(.callout.bold())
-                        Text(engine.retreatPenalty())
-                            .font(.caption)
+                        Text("撤退会有随机损失（待定）")
+                            .font(.callout.bold())
+                        Text("金币、生命、装备耐久、随从状态可能受损")
+                            .font(.caption2)
                             .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
                         HStack(spacing: 10) {
                             Button { engine.cancelRetreat() } label: {
                                 Text("取消").frame(width: 70)
@@ -131,17 +129,6 @@ struct TowerGameView: View {
                 }
                 if engine.demonMode {
                     Label("魔化", systemImage: "flame.fill").foregroundStyle(.red)
-                }
-                // 宠物/精灵生命点 + 状态
-                if engine.petMaxHP > 0 {
-                    Label("\(engine.petHP)/\(engine.petMaxHP) \(petStateIcon(engine.petState))", systemImage: "pawprint.fill")
-                        .foregroundStyle(petStateColor(engine.petState))
-                        .help("宠物·\(petStateName(engine.petState))")
-                }
-                if engine.spriteMaxHP > 0 {
-                    Label("\(engine.spriteHP)/\(engine.spriteMaxHP) \(petStateIcon(engine.spriteState))", systemImage: "sparkles")
-                        .foregroundStyle(petStateColor(engine.spriteState))
-                        .help("精灵·\(petStateName(engine.spriteState))")
                 }
                 heroBadge
             default:
@@ -575,15 +562,6 @@ struct TowerGameView: View {
                         .font(.caption).foregroundStyle(.secondary)
                     Text(engine.hero == .demon ? "🔥 \(engine.hp)（反噬 \(engine.demonBacklashChance)%）" : "❤️ \(engine.hp)/\(engine.maxHP)")
                         .font(.caption).foregroundStyle(.red)
-                    // 宠物/精灵生命点
-                    if engine.petMaxHP > 0 {
-                        Text("🐾 \(engine.petHP)/\(engine.petMaxHP)")
-                            .font(.caption2).foregroundStyle(.orange)
-                    }
-                    if engine.spriteMaxHP > 0 {
-                        Text("✨ \(engine.spriteHP)/\(engine.spriteMaxHP)")
-                            .font(.caption2).foregroundStyle(.purple)
-                    }
                 }
                 Text(engine.stage.subtitle).font(.caption2).foregroundStyle(.secondary)
 
@@ -591,56 +569,8 @@ struct TowerGameView: View {
 
                 Divider().padding(.horizontal, 20)
 
-                Text(engine.groupChoices.isEmpty
-                     ? (engine.floor >= engine.stage.floors ? "⚔️ 境主「\(engine.stage.bossName)」就在前方" : "选择前行的路线")
-                     : "🏕️ 组内休整——选择下一步")
+                Text(engine.floor >= engine.stage.floors ? "⚔️ 境主「\(engine.stage.bossName)」就在前方" : "选择前行的路线")
                     .font(.subheadline.bold())
-
-                // S2 分叉口：路线预览卡（险路/平路/秘路）
-                if !engine.branchRoutes.isEmpty {
-                    Text("前方分叉口——选择你的路线")
-                        .font(.subheadline.bold())
-                        .foregroundStyle(.orange)
-                    ForEach(engine.branchRoutes, id: \.self) { route in
-                        Button { engine.chooseRoute(route) } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: route.icon)
-                                    .font(.title3)
-                                    .frame(width: 34, height: 34)
-                                    .foregroundStyle(routeColor(route))
-                                    .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack(spacing: 5) {
-                                        Text(route.title).font(.subheadline.bold())
-                                        Text(route.badge).font(.caption2)
-                                            .padding(.horizontal, 5).padding(.vertical, 1)
-                                            .background(Capsule().fill(routeColor(route).opacity(0.15)))
-                                            .foregroundStyle(routeColor(route))
-                                        Text("难度 \(route.stars)").font(.caption2).foregroundStyle(.secondary)
-                                    }
-                                    Text(route.desc).font(.caption).foregroundStyle(.secondary)
-                                    HStack(spacing: 8) {
-                                        Text(route.stageCountText).font(.caption2).foregroundStyle(.secondary)
-                                        Text(route.rewardText).font(.caption2)
-                                            .foregroundStyle(route == .perilous ? .orange : .secondary)
-                                    }
-                                }
-                                Spacer()
-                                Image(systemName: "chevron.right").foregroundStyle(.tertiary)
-                            }
-                            .padding(10)
-                            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(engine.isRouteUsed(route))
-                        .opacity(engine.isRouteUsed(route) ? 0.4 : 1)
-                    }
-                }
-
-                /// 组内选择：每战后选择下一行动（继续/休息/突击）
-                if !engine.groupChoices.isEmpty {
-                    GroupChoiceCards(engine: engine)
-                }
 
                 ForEach(Array(engine.choices.enumerated()), id: \.offset) { _, node in
                     Button { engine.choose(node) } label: {
@@ -653,13 +583,6 @@ struct TowerGameView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 HStack(spacing: 5) {
                                     Text(routeTitle(node)).font(.subheadline.bold())
-                                    // 关卡组节点：标注组内连战关数
-                                    if engine.groupCount(for: node) > 0 {
-                                        Text("\(engine.groupCount(for: node)) 关连战").font(.caption2)
-                                            .padding(.horizontal, 5).padding(.vertical, 1)
-                                            .background(Capsule().fill(Color.orange.opacity(0.15)))
-                                            .foregroundStyle(.orange)
-                                    }
                                     if isShortcut(node) {
                                         Text("捷径").font(.caption2)
                                             .padding(.horizontal, 5).padding(.vertical, 1)
@@ -767,12 +690,10 @@ struct TowerGameView: View {
         .frame(height: height)
     }
 
-    /// 节点三态：未挑战（原色）/ 挑战中（橙）/ 已通关（绿）；下方标注关卡组关数+子关卡进度
     private func trackDot(index: Int, total: Int, isBoss: Bool, passed: Bool, current: Bool) -> some View {
         let icon = isBoss ? "crown.fill"
             : (passed ? "checkmark" : (current ? "figure.walk" : "questionmark"))
-        let color: Color = passed ? .green : (current ? .orange : (isBoss ? .red : .secondary))
-        let cnt = isBoss ? 0 : engine.groupCount
+        let color: Color = passed ? .green : (current ? Color.accentColor : (isBoss ? .red : .secondary))
         return VStack(spacing: 2) {
             Image(systemName: icon)
                 .font(.caption.bold())
@@ -783,19 +704,9 @@ struct TowerGameView: View {
             if isBoss {
                 Text("境主").font(.system(size: 9)).foregroundStyle(.red)
             } else if current {
-                Text("挑战中 · \(cnt) 关").font(.system(size: 9)).foregroundStyle(.orange)
+                Text("你在这里").font(.system(size: 9)).foregroundStyle(Color.accentColor)
             } else {
-                Text("关卡\(index) · \(cnt) 关").font(.system(size: 9)).foregroundStyle(.secondary)
-            }
-            // 子关卡进度点（非Boss节点显示组内关数进度）
-            if !isBoss, cnt > 0 {
-                HStack(spacing: 3) {
-                    ForEach(1...cnt, id: \.self) { i in
-                        Circle()
-                            .fill(passed ? Color.green : (current && i == 1 ? Color.orange : Color.secondary.opacity(0.35)))
-                            .frame(width: 5, height: 5)
-                    }
-                }
+                Text("关卡\(index)").font(.system(size: 9)).foregroundStyle(.secondary)
             }
         }
         .opacity(passed || current || isBoss ? 1 : 0.55)
@@ -812,172 +723,6 @@ struct TowerGameView: View {
         }
     }
 
-    private func routeColor(_ route: RouteType) -> Color {
-        switch route {
-        case .perilous: return .red
-        case .steady: return .green
-        case .mystery: return .purple
-        }
-    }
-
-    // MARK: - 组内选择卡片
-
-    /// 关卡组内选择：进度条 + 三条行动路线（继续/休息/突击）
-    @ViewBuilder
-    private func GroupChoiceCards(engine: TowerGameEngine) -> some View {
-        VStack(spacing: 8) {
-            // 组进度条
-            HStack(spacing: 6) {
-                Image(systemName: "square.grid.3x2.fill")
-                    .foregroundStyle(Color.accentColor)
-                Text("关卡组 \(engine.groupIndex)/\(engine.groupTotal)")
-                    .font(.callout.bold())
-                Spacer()
-                // 当前血量：帮助决策是否调息
-                Text(engine.hero == .demon ? "🔥 \(engine.hp)" : "❤️ \(engine.hp)/\(engine.maxHP)")
-                    .font(.callout.monospacedDigit().bold())
-                    .foregroundStyle(engine.hero == .demon ? .orange : hpColor)
-            }
-            .padding(.horizontal, 4)
-
-            // 进度点
-            HStack(spacing: 4) {
-                ForEach(1...engine.groupTotal, id: \.self) { i in
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(i < engine.groupIndex ? Color.green : (i == engine.groupIndex ? Color.accentColor : Color.secondary.opacity(0.3)))
-                        .frame(height: 4)
-                }
-            }
-
-            Divider()
-
-            Text("选择下一行动")
-                .font(.caption.bold())
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-            ForEach(engine.groupChoices, id: \.self) { choice in
-                Button { engine.chooseGroupChoice(choice) } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: groupChoiceIcon(choice))
-                            .font(.title3)
-                            .frame(width: 34, height: 34)
-                            .foregroundStyle(groupChoiceColor(choice))
-                            .background(groupChoiceColor(choice).opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(groupChoiceTitle(choice)).font(.subheadline.bold())
-                            Text(groupChoiceDesc(choice)).font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .font(.caption)
-                            .foregroundStyle(groupChoiceColor(choice))
-                    }
-                    .padding(10)
-                    .background(RoundedRectangle(cornerRadius: 12).fill(Color.accentColor.opacity(0.04)))
-                    .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(groupChoiceColor(choice).opacity(0.2), lineWidth: 1))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(12)
-        .background(RoundedRectangle(cornerRadius: 14).fill(.quaternary.opacity(0.15)))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(.quaternary, lineWidth: 1))
-    }
-
-    private func groupChoiceIcon(_ choice: GroupChoice) -> String {
-        switch choice {
-        case .normal: return engine.nextSubBattleNode?.icon ?? "figure.walk"
-        case .rest: return "drop.fill"
-        case .rush: return engine.rushSubBattleNode?.icon ?? "flame"
-        }
-    }
-
-    private func groupChoiceColor(_ choice: GroupChoice) -> Color {
-        switch choice {
-        case .normal: return Color.accentColor
-        case .rest: return .orange
-        case .rush: return .red
-        }
-    }
-
-    private func groupChoiceTitle(_ choice: GroupChoice) -> String {
-        switch choice {
-        case .normal:
-            if let node = engine.nextSubBattleNode {
-                let preview = engine.previewSubBattle(node)
-                return "进入 · \(preview.name)"
-            }
-            return "继续战斗"
-        case .rest:
-            return "调息恢复 +5"
-        case .rush:
-            if let node = engine.rushSubBattleNode {
-                let preview = engine.previewSubBattle(node)
-                return "突击 · \(preview.name)"
-            }
-            return "突击收尾"
-        }
-    }
-
-    private func groupChoiceDesc(_ choice: GroupChoice) -> String {
-        switch choice {
-        case .normal:
-            if let node = engine.nextSubBattleNode {
-                let tag = subBattleTag(node)
-                return "\(tag) · 进入下一关继续答题"
-            }
-            return "进入下一关，继续战斗"
-        case .rest:
-            return "消耗时间调息，恢复 5 点生命"
-        case .rush:
-            if let node = engine.rushSubBattleNode {
-                let preview = engine.previewSubBattle(node)
-                return "跳过中间直取「\(preview.name)」\(preview.icon)"
-            }
-            return "跳过中间关卡，直取组首领"
-        }
-    }
-
-    /// 子关卡类型标签
-    private func subBattleTag(_ node: NodeType) -> String {
-        switch node {
-        case .elite: return "⚡精英"
-        case .timedTrial: return "⏳限时"
-        case .battle: return "⚔️普通"
-        default: return ""
-        }
-    }
-
-    // MARK: - 宠物/精灵状态
-
-    private func petStateColor(_ state: TowerGameEngine.PetSpriteState) -> Color {
-        switch state {
-        case .healthy: return .green
-        case .injured: return .orange
-        case .critical: return .red
-        case .gone: return .secondary
-        }
-    }
-
-    private func petStateIcon(_ state: TowerGameEngine.PetSpriteState) -> String {
-        switch state {
-        case .healthy: return "👍"
-        case .injured: return "⚠️"
-        case .critical: return "💀"
-        case .gone: return "✖️"
-        }
-    }
-
-    private func petStateName(_ state: TowerGameEngine.PetSpriteState) -> String {
-        switch state {
-        case .healthy: return "健康"
-        case .injured: return "受伤"
-        case .critical: return "濒死"
-        case .gone: return "已离去"
-        }
-    }
-
     // MARK: - 突发事件
 
     private func eventView(_ event: TowerEvent) -> some View {
@@ -989,59 +734,23 @@ struct TowerGameView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 30)
 
-            if event == .ruins {
-                // 上古遗迹：三选一宝箱
-                ForEach(Array(engine.ruinsOptions.enumerated()), id: \.offset) { idx, opt in
-                    Button { engine.selectRuinsOption(idx) } label: {
-                        Text(opt).frame(minWidth: 180)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(idx == 0 ? .yellow : (idx == 1 ? .green : .red))
-                    .controlSize(.large)
-                }
+            Button {
+                engine.acceptEvent(event)
+            } label: {
+                Label(event == .forced ? "应战！" : "接受挑战", systemImage: "bolt.fill")
+                    .frame(minWidth: 150)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .keyboardShortcut(.defaultAction)
+
+            if event != .forced {
                 Button {
                     engine.declineEvent(event)
                 } label: {
                     Text("绕行离开").frame(minWidth: 150)
                 }
                 .controlSize(.large)
-            } else {
-                // 通用事件按钮
-                let acceptLabel: String = {
-                    switch event {
-                    case .forced: return "应战！"
-                    case .robber: return "应战！"
-                    case .wordTide: return "迎战词妖潮！"
-                    case .spring: return "饮泉疗伤"
-                    case .earBomb: return "凝神抵御"
-                    case .mindTrial: return "进入幻境"
-                    case .forkRoad: return "走左边"
-                    case .luckFall: return "沐浴祥光"
-                    case .wordSpirit: return "花费 30 金币"
-                    case .realmSuppress: return "硬闯（惩罚加重）"
-                    case .opportunity: return "接受挑战"
-                    case .trial: return "接受挑战"
-                    default: return "接受"
-                    }
-                }()
-                Button {
-                    engine.acceptEvent(event)
-                } label: {
-                    Label(acceptLabel, systemImage: "bolt.fill")
-                        .frame(minWidth: 150)
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .keyboardShortcut(.defaultAction)
-
-                if event != .forced, event != .robber, event != .wordTide, event != .earBomb, event != .mindTrial, event != .luckFall {
-                    Button {
-                        engine.declineEvent(event)
-                    } label: {
-                        Text("绕行离开").frame(minWidth: 150)
-                    }
-                    .controlSize(.large)
-                }
             }
         }
         .padding(30)
@@ -1053,32 +762,12 @@ struct TowerGameView: View {
     private var battleView: some View {
         if let battle = engine.battle {
             VStack(spacing: 10) {
-                // 战斗提示（宠物技能/墓穴等）
-                if let toast = engine.toast {
-                    Text(toast)
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .multilineTextAlignment(.center)
-                }
                 VStack(spacing: 6) {
                     HStack(spacing: 8) {
                         Image(systemName: battle.enemyIcon)
                             .font(.title2)
                             .foregroundStyle(battle.node == .boss ? .red : .primary)
                         Text(battle.enemyName).font(.headline)
-                        // 关卡组进度：第几关/共几关（魔修火焰图标，普适剑图标）
-                        if engine.groupTotal > 0 {
-                            Label("\(engine.groupIndex)/\(engine.groupTotal)",
-                                  systemImage: engine.hero == .demon ? "flame.fill" : "sword")
-                                .font(.callout.monospacedDigit().bold())
-                                .foregroundStyle(engine.hero == .demon ? .red : .orange)
-                            // 阶段类型标签
-                            Text(subBattleTag(battle.node))
-                                .font(.caption2.bold())
-                                .padding(.horizontal, 5).padding(.vertical, 1)
-                                .background(Capsule().fill(Color.accentColor.opacity(0.12)))
-                                .foregroundStyle(Color.accentColor)
-                        }
                         if battle.isTimed {
                             Label("\(battle.timeLeft)s", systemImage: "timer")
                                 .font(.callout.monospacedDigit().bold())
@@ -1091,11 +780,7 @@ struct TowerGameView: View {
                     HStack(spacing: 3) {
                         ForEach(0..<battle.enemyMaxHP, id: \.self) { index in
                             RoundedRectangle(cornerRadius: 2)
-                                .fill(index < battle.enemyHP
-                                      ? (Double(index) / Double(max(1, battle.enemyMaxHP)) > 0.5
-                                         ? Color.red : (Double(index) / Double(max(1, battle.enemyMaxHP)) > 0.25
-                                                         ? Color.orange : Color.yellow))
-                                      : Color.secondary.opacity(0.2))
+                                .fill(index < battle.enemyHP ? Color.red : Color.secondary.opacity(0.2))
                                 .frame(height: 8)
                         }
                     }
@@ -1133,39 +818,16 @@ struct TowerGameView: View {
                         .background(Capsule().fill(Color.accentColor.opacity(0.12)))
                         .foregroundStyle(Color.accentColor)
 
-                    if question.kind == .listen {
-                        Text("🎧 听音辨义——选择正确释义")
-                            .font(.headline)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text(question.prompt)
-                            .font(question.kind == .enToCn
-                                  ? .system(size: 30, weight: .bold, design: .rounded)
-                                  : .system(size: 17, weight: .semibold))
-                            .multilineTextAlignment(.center)
-                            .lineLimit(3)
-                            .minimumScaleFactor(0.6)
-                            .padding(.horizontal, 24)
-                    }
+                    Text(question.prompt)
+                        .font(question.kind == .enToCn
+                              ? .system(size: 30, weight: .bold, design: .rounded)
+                              : .system(size: 17, weight: .semibold))
+                        .multilineTextAlignment(.center)
+                        .lineLimit(3)
+                        .minimumScaleFactor(0.6)
+                        .padding(.horizontal, 24)
 
-                    if question.kind == .listen || question.kind == .listenSpell {
-                        // 听音辨词/听音拼写：播放按钮
-                        Button {
-                            SpeechService.shared.speak(question.word.headword)
-                        } label: {
-                            Label("🔊 播放发音", systemImage: "speaker.wave.3.fill")
-                                .font(.title2)
-                                .padding(10)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
-                    }
-                    if question.kind == .listen {
-                        // 听音辨词：四选一
-                        choiceArea(question, battle: battle)
-                    } else if question.kind == .match || question.kind == .sentenceMatch {
-                        matchArea(question)
-                    } else if question.kind == .spell || question.kind == .listenSpell {
+                    if question.kind == .spell {
                         spellArea(question)
                     } else {
                         choiceArea(question, battle: battle)
@@ -1178,64 +840,6 @@ struct TowerGameView: View {
         }
     }
 
-    /// 词义连线：左列单词 + 右列释义，点词→点释义配对（4 对全配自动判分）
-    private func matchArea(_ question: TowerGameEngine.Question) -> some View {
-        let leftWords = question.pairs.map(\.word).shuffled()
-        let rightDefs = question.pairs.map(\.definition).shuffled()
-        return HStack(alignment: .top, spacing: 14) {
-            // 左列：单词
-            VStack(spacing: 6) {
-                ForEach(leftWords, id: \.self) { word in
-                    let paired = engine.matchAnswers[word]
-                    Button {
-                        selectedMatchWord = selectedMatchWord == word ? nil : word
-                    } label: {
-                        Text(word)
-                            .font(.callout.bold())
-                            .frame(maxWidth: 130, alignment: .leading)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .background(RoundedRectangle(cornerRadius: 8)
-                                .fill(selectedMatchWord == word ? Color.accentColor.opacity(0.2)
-                                      : (paired != nil ? Color.green.opacity(0.15) : Color.secondary.opacity(0.08))))
-                            .overlay(RoundedRectangle(cornerRadius: 8)
-                                .strokeBorder(selectedMatchWord == word ? Color.accentColor
-                                              : (paired != nil ? Color.green : .clear), lineWidth: 1))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(paired != nil)
-                }
-            }
-            // 右列：释义
-            VStack(spacing: 6) {
-                ForEach(rightDefs, id: \.self) { def in
-                    let usedBy = engine.matchAnswers.first(where: { $0.value == def })?.key
-                    Button {
-                        if let w = selectedMatchWord {
-                            engine.selectMatchPair(word: w, definition: def)
-                            selectedMatchWord = nil
-                        }
-                    } label: {
-                        Text(def)
-                            .font(.caption)
-                            .frame(maxWidth: 200, alignment: .leading)
-                            .lineLimit(2)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 6)
-                            .background(RoundedRectangle(cornerRadius: 8)
-                                .fill(usedBy != nil ? Color.green.opacity(0.15) : Color.secondary.opacity(0.08)))
-                            .overlay(RoundedRectangle(cornerRadius: 8)
-                                .strokeBorder(usedBy != nil ? Color.green : .clear, lineWidth: 1))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(selectedMatchWord == nil || usedBy != nil)
-                }
-            }
-        }
-        .padding(.horizontal, 24)
-    }
-
-    @ViewBuilder
     private func choiceArea(_ question: TowerGameEngine.Question,
                             battle: TowerGameEngine.Battle) -> some View {
         VStack(spacing: 7) {
@@ -1255,9 +859,6 @@ struct TowerGameView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(battle.lastAnswerCorrect != nil)
-                .onHover { hovering in
-                    // hover 效果仅在有选项指示灯时生效
-                }
                 .keyboardShortcut(KeyEquivalent(Character("\(index + 1)")), modifiers: [])
             }
         }
@@ -1316,23 +917,9 @@ struct TowerGameView: View {
                 .foregroundStyle(.secondary)
             }
             if let correct = battle.lastAnswerCorrect {
-                HStack(spacing: 6) {
-                    Image(systemName: correct ? "checkmark.circle.fill" : "xmark.circle.fill")
-                        .foregroundStyle(correct ? Color.green : Color.red)
-                    Text(correct ? "命中！" : "挨了一击")
-                        .foregroundStyle(correct ? Color.green : Color.red)
-                        .font(.callout.bold())
-                    if correct, battle.perfect {
-                        Label("完美 ×1.5", systemImage: "star.fill")
-                            .font(.caption.bold())
-                            .foregroundStyle(.yellow)
-                    }
-                }
-            }
-            if battle.weakened {
-                Label("破绽：首领攻击减半", systemImage: "shield.slash.fill")
-                    .font(.caption2.bold())
-                    .foregroundStyle(.orange)
+                Text(correct ? "⚔️ 命中！" : "💥 挨了一击")
+                    .foregroundStyle(correct ? Color.green : Color.red)
+                    .font(.callout.bold())
             }
         }
         .font(.caption)

@@ -145,27 +145,7 @@ struct WordCategory: Identifiable, Equatable {
         WordCategory(id: "money", label: "财物", icon: "dollarsign.circle.fill", posMarks: [],
                      keywords: ["钱", "价格", "买", "卖", "支付", "财", "贸易", "市场", "银行", "经济"]),
         WordCategory(id: "sound", label: "声音", icon: "speaker.wave.3.fill", posMarks: [],
-                     keywords: ["声", "音", "唱", "叫", "响", "音乐", "噪"]),
-        WordCategory(id: "furniture", label: "家具", icon: "bed.double.fill", posMarks: [],
-                     keywords: ["桌", "椅", "床", "柜", "门", "窗", "灯", "家具", "沙", "橱", "帘", "垫"]),
-        WordCategory(id: "electronics", label: "电子", icon: "desktopcomputer", posMarks: [],
-                     keywords: ["电脑", "手机", "网络", "软件", "硬件", "电子", "信息", "数据", "设备", "机器"]),
-        WordCategory(id: "building", label: "建筑", icon: "building.2.fill", posMarks: [],
-                     keywords: ["建筑", "房", "屋", "墙", "桥", "塔", "宫殿", "庙", "寺", "城"]),
-        WordCategory(id: "music", label: "音乐", icon: "music.note.list", posMarks: [],
-                     keywords: ["音乐", "歌", "曲", "琴", "鼓", "乐器", "演唱", "声乐", "旋律", "节奏", "舞"]),
-        WordCategory(id: "health", label: "健康", icon: "heart.circle.fill", posMarks: [],
-                     keywords: ["医", "药", "病", "治疗", "健康", "手术", "痛", "锻炼", "健身", "营养"]),
-        WordCategory(id: "politics", label: "政治", icon: "building.columns.fill", posMarks: [],
-                     keywords: ["政治", "政府", "选举", "政策", "民主", "法律", "议会", "权利", "管理", "制度"]),
-        WordCategory(id: "military", label: "军事", icon: "shield.ranged.fill", posMarks: [],
-                     keywords: ["军事", "战争", "军队", "武器", "战斗", "进攻", "防御", "战略", "士兵", "冲突"]),
-        WordCategory(id: "tech", label: "科技", icon: "gearshape.2.fill", posMarks: [],
-                     keywords: ["科技", "技术", "科学", "创新", "发明", "实验室", "雷达", "卫星", "工业", "工程"]),
-        WordCategory(id: "art", label: "艺术", icon: "paintpalette.fill", posMarks: [],
-                     keywords: ["艺术", "绘画", "雕塑", "美学", "展览", "风格", "设计", "创造", "工艺"]),
-        WordCategory(id: "travel", label: "旅行", icon: "airplane.departure", posMarks: [],
-                     keywords: ["旅行", "旅游", "度假", "风景", "出发", "参观", "游览", "目的地", "旅程"])
+                     keywords: ["声", "音", "唱", "叫", "响", "音乐", "噪"])
     ]
 }
 
@@ -173,20 +153,6 @@ struct WordCategory: Identifiable, Equatable {
 
 enum QuestionKind: String, CaseIterable {
     case enToCn, cnToEn, spell, engDef
-    // S3 新题型
-    case listen       // 听音辨词：TTS 朗读后 4 选 1
-    case formChange   // 词形变换：给原形选变形
-    case match        // 词义连线：4 词 × 4 释义配对
-    case cloze        // 完形填空：例句挖空选词
-    case rootMerge    // 词根拆解：碎片组合成词
-    case combo        // 限时连击：60 秒连续作答（基础题型）
-    // S3.5 考试题型
-    case judge        // 判断正误：词 + 说法，判对错
-    case scramble     // 乱序组词：打乱字母选正确排列
-    case synonym      // 同义替换：句中划线词选同义词
-    case listenSpell  // 听音拼写：TTS 朗读 + 首字母提示拼写
-    case fillBlank    // 选词填空：段落挖空选词
-    case sentenceMatch // 例句配对：4 词 × 4 例句
 
     var label: String {
         switch self {
@@ -194,18 +160,6 @@ enum QuestionKind: String, CaseIterable {
         case .cnToEn: return "中选英"
         case .spell: return "拼写"
         case .engDef: return "英释选词"
-        case .listen: return "听音辨义"
-        case .formChange: return "词形变换"
-        case .match: return "词义连线"
-        case .cloze: return "完形填空"
-        case .rootMerge: return "词根拆解"
-        case .combo: return "限时连击"
-        case .judge: return "判断正误"
-        case .scramble: return "乱序组词"
-        case .synonym: return "同义替换"
-        case .listenSpell: return "听音拼写"
-        case .fillBlank: return "选词填空"
-        case .sentenceMatch: return "例句配对"
         }
     }
 
@@ -215,47 +169,8 @@ enum QuestionKind: String, CaseIterable {
         case .cnToEn: return "character.square"
         case .spell: return "keyboard"
         case .engDef: return "text.book.closed"
-        case .listen: return "ear"
-        case .formChange: return "pencil.and.outline"
-        case .match: return "arrow.left.arrow.right.square"
-        case .cloze: return "text.insert"
-        case .rootMerge: return "puzzlepiece.extension"
-        case .combo: return "flame"
-        case .judge: return "checkmark.seal"
-        case .scramble: return "shuffle"
-        case .synonym: return "arrow.triangle.2.circlepath"
-        case .listenSpell: return "ear.badge.checkmark"
-        case .fillBlank: return "text.badge.plus"
-        case .sentenceMatch: return "text.quote"
         }
     }
-
-    /// 新题型随境界逐个开放：2 境起每境解锁一种（新手期循序渐进，避免一次性涌入）
-    /// 考试题型：5 境筑基 = 判断正误/乱序组词；6 境金丹 = 同义替换/听音拼写；8 境化神 = 选词填空/例句配对
-    static func available(stageIndex: Int) -> [QuestionKind] {
-        var kinds: [QuestionKind] = [.enToCn, .cnToEn, .spell]
-        if stageIndex >= 2 { kinds.append(.engDef) }        // 炼气初期
-        if stageIndex >= 3 { kinds.append(.listen) }        // 炼气中期
-        if stageIndex >= 4 { kinds.append(.combo) }         // 炼气后期
-        if stageIndex >= 5 { kinds.append(.formChange) }    // 筑基
-        if stageIndex >= 5 { kinds.append(.judge) }         // 筑基 · 考试
-        if stageIndex >= 5 { kinds.append(.scramble) }      // 筑基 · 考试
-        if stageIndex >= 6 { kinds.append(.cloze) }         // 金丹
-        if stageIndex >= 6 { kinds.append(.synonym) }       // 金丹 · 考试
-        if stageIndex >= 6 { kinds.append(.listenSpell) }   // 金丹 · 考试
-        if stageIndex >= 7 { kinds.append(.match) }         // 元婴
-        if stageIndex >= 8 { kinds.append(.rootMerge) }     // 化神
-        if stageIndex >= 8 { kinds.append(.fillBlank) }     // 化神 · 考试
-        if stageIndex >= 8 { kinds.append(.sentenceMatch) } // 化神 · 考试
-        return kinds
-    }
-}
-
-// MARK: - 词义连线配对
-
-struct MatchPair: Equatable {
-    let word: String
-    let definition: String
 }
 
 // MARK: - 地图节点
@@ -304,113 +219,16 @@ enum NodeType: Equatable {
     }
 }
 
-// MARK: - 分叉口路线（S2：每个分叉口 2~3 条候选路线）
-
-enum RouteType: Equatable, Hashable {
-    case perilous   // 险路：⚔️ 强敌
-    case steady     // 平路：🛡️ 稳妥
-    case mystery    // 秘路：❓ 未知
-
-    var title: String {
-        switch self {
-        case .perilous: return "险路"
-        case .steady: return "平路"
-        case .mystery: return "秘路"
-        }
-    }
-
-    var badge: String {
-        switch self {
-        case .perilous: return "⚔️ 强敌"
-        case .steady: return "🛡️ 稳妥"
-        case .mystery: return "❓ 未知"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .perilous: return "bolt.fill"
-        case .steady: return "shield.fill"
-        case .mystery: return "questionmark.circle.fill"
-        }
-    }
-
-    /// 难度星级（秘路未知，用问号）
-    var stars: String {
-        switch self {
-        case .perilous: return "★★★"
-        case .steady: return "★★"
-        case .mystery: return "？"
-        }
-    }
-
-    /// 组内关数（秘路随机 2~4 关）
-    var stageCountText: String {
-        switch self {
-        case .perilous: return "2 关"
-        case .steady: return "3 关"
-        case .mystery: return "2~4 关"
-        }
-    }
-
-    /// 预期收益描述（秘路隐藏）
-    var rewardText: String {
-        switch self {
-        case .perilous: return "组奖励 ×2 · 高品阶掉落 ↑"
-        case .steady: return "标准奖励"
-        case .mystery: return "？"
-        }
-    }
-
-    var desc: String {
-        switch self {
-        case .perilous: return "敌人更强（+30% 血攻），但组奖励翻倍、掉落更好"
-        case .steady: return "标准强度，稳步推进"
-        case .mystery: return "一切未知——可能大赚，也可能血亏"
-        }
-    }
-}
-
-// MARK: - 组内选择（S2+：每战后选择继续/休息/突击）
-
-enum GroupChoice: Equatable, Hashable {
-    case normal    // 继续战斗：进入下一子关卡
-    case rest      // 调息恢复 +5
-    case rush      // 突击收尾：跳过中间，直达最后一关
-}
-
 // MARK: - 突发事件
 
 enum TowerEvent: Equatable {
     case forced, opportunity, trial
-    // 新事件
-    case spring         // 灵泉现世：可选回血
-    case robber         // 劫匪拦路：强制战斗，失败扣 30% 金币
-    case ruins          // 上古遗迹：三选一宝箱
-    case wordTide       // 词妖潮：连续 3 场小怪战
-    // 剩余 6 种
-    case earBomb        // 魔音灌耳：3 道听音题
-    case mindTrial      // 心魔幻境：5 道连续题
-    case forkRoad       // 迷雾岔路：两条未知路
-    case wordSpirit     // 词灵求救：花 30 金加 buff
-    case luckFall       // 天降奇遇：免费 buff
-    case realmSuppress  // 境界压制：本组答错 +1
 
     var title: String {
         switch self {
         case .forced: return "⚠️ 妖潮突袭！"
         case .opportunity: return "✨ 秘宝洞窟"
         case .trial: return "💡 灵光乍现"
-        case .spring: return "💧 灵泉现世"
-        case .robber: return "💰 劫匪拦路"
-        case .ruins: return "🏛️ 上古遗迹"
-        case .wordTide: return "🌊 词妖潮"
-        case .earBomb: return "🔊 魔音灌耳"
-        case .mindTrial: return "🧠 心魔幻境"
-        case .forkRoad: return "🌫️ 迷雾岔路"
-        case .wordSpirit: return "🧚 词灵求救"
-        case .luckFall: return "✨ 天降奇遇"
-        case .realmSuppress: return "⚡ 境界压制"
         }
     }
 
@@ -419,16 +237,6 @@ enum TowerEvent: Equatable {
         case .forced: return "词妖拦路，避无可避——必须应战！"
         case .opportunity: return "洞中似有秘宝，但守卫凶猛。胜利必得重宝，却也可能沾染诅咒……挑战还是绕行？"
         case .trial: return "一道灵光闪过：20 秒内答对 3 题即得奖励。失败也无损失，试试吗？"
-        case .spring: return "一缕灵泉自地底涌出，清澈甘甜——可回复生命，也可绕行继续赶路。"
-        case .robber: return "一伙劫匪拦住了去路，狞笑着要你留下买路财——必须应战！若不慎落败，身上金币将折损三成。"
-        case .ruins: return "你发现一处上古遗迹，三个宝箱并列而放，但只能打开一个——选错了可能会有陷阱……"
-        case .wordTide: return "成群的词妖如潮水般涌来——连续三场恶战！答对率超过六成方可无伤过关。"
-        case .earBomb: return "刺耳的魔音灌入脑髓——连续 3 道听音题！答对 2 题即得金币，否则神魂受损扣血 4 点。"
-        case .mindTrial: return "心魔幻境将你的心神拉入试炼——连续答 5 题，答对越多的奖励越丰厚，但也可能空手而归反受其伤。"
-        case .forkRoad: return "前方出现两条岔路，浓雾弥漫看不清尽头——选一条走吧，未知的命运在等待。"
-        case .wordSpirit: return "一只受伤的词灵倒在路边，它说若肯花 30 金币救它，它便在你接下来的战斗中助你一臂之力。"
-        case .luckFall: return "一道祥光从天而降，沐浴其中感觉浑身充满了力量——下个节点组获得增益！"
-        case .realmSuppress: return "此方天地灵气紊乱，修为受到压制——接下来的关卡组答错惩罚加重！你可以绕开此行省……"
         }
     }
 }
@@ -1101,8 +909,6 @@ struct GameItem: Identifiable, Equatable {
                  effectDesc: "服用回满生命", maxDurability: 1, price: 240, restrictedTo: nil, lore: "炉中丹成，天雷都要退三分。吃之前记得先看看有没有猴毛。", healAmount: 99),
         GameItem(id: "timelessHour", name: "无尽时轮", icon: "clock.arrow.2.circlepath", tier: .goldLegend, category: .potion,
                  effectDesc: "限时战斗 +60 秒", maxDurability: 1, price: 260, restrictedTo: nil, lore: "轮转不休，时间在它面前只是个提议。", timeBonus: 60),
-        GameItem(id: "moonlightBox", name: "月光宝盒", icon: "moon.stars.fill", tier: .legendary, category: .potion,
-                 effectDesc: "死亡时自动发动：随机回到当前境界任一节点", maxDurability: 1, price: 320, restrictedTo: nil, lore: "月宫遗落的秘盒，能在生死一瞬逆转时空。传说它只救有缘人——而有缘，往往就是兜里有它。"),
         // ── 宠物
         GameItem(id: "bookWorm", name: "书虫", icon: "ant.fill", tier: .low, category: .pet,
                  effectDesc: "每次胜利额外 +1 金币", maxDurability: 99, price: 35, restrictedTo: nil, lore: "真的会吃书。好在它只吃你背错的那几页。", coinBonus: 1),

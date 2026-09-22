@@ -1,5 +1,4 @@
 import AppKit
-import Combine
 import SwiftUI
 import DailyWordCore
 
@@ -10,7 +9,6 @@ final class StudyPanelController {
 
     private let session: StudySession
     private var panel: KeyablePanel?
-    private var moveCancellable: AnyCancellable?
     var onVisibilityChanged: (() -> Void)?
 
     var isVisible: Bool { panel != nil }
@@ -68,12 +66,15 @@ final class StudyPanelController {
             panel.setFrameOrigin(NSPoint(x: vf.maxX - size.width - 24,
                                          y: vf.maxY - size.height - 24))
         }
-        moveCancellable = NotificationCenter.default.publisher(for: NSWindow.didMoveNotification, object: panel)
-            .receive(on: RunLoop.main)
-            .sink { [weak self, weak panel] _ in
-                guard let self, let panel, self.panel === panel else { return }
-                UserDefaults.standard.set(NSStringFromPoint(panel.frame.origin), forKey: Self.originKey)
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didMoveNotification, object: panel, queue: .main
+        ) { note in
+            guard let window = note.object as? NSWindow else { return }
+            let origin = window.frame.origin
+            Task { @MainActor in
+                UserDefaults.standard.set(NSStringFromPoint(origin), forKey: Self.originKey)
             }
+        }
 
         panel.orderFrontRegardless()
         panel.makeKey()
@@ -118,7 +119,6 @@ final class StudyPanelController {
     }
 
     func hide() {
-        moveCancellable = nil
         panel?.orderOut(nil)
         panel = nil
         onVisibilityChanged?()

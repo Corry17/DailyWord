@@ -236,6 +236,9 @@ final class QuizEngine: ObservableObject {
             : question.options[question.correctIndex]
         feedback = success ? .correct(answer: answer) : .wrong(answer: answer)
 
+        // 引导第 5 步：答对一题即鼓励并进入下一步
+        AppServices.shared.onboardingFlow.notifyQuizAnswered(correct: success)
+
         SpeechService.shared.speak(question.item.word.headword)
 
         // 到期词的练习结果计入复习排期
@@ -415,7 +418,6 @@ final class QuizOverlayController {
     let engine: QuizEngine
     private var panel: KeyablePanel?
     private var modeCancellable: AnyCancellable?
-    private var moveCancellable: AnyCancellable?
     var onVisibilityChanged: (() -> Void)?
 
     var isVisible: Bool { panel != nil }
@@ -483,12 +485,15 @@ final class QuizOverlayController {
         }
 
         // 拖动后记住位置
-        moveCancellable = NotificationCenter.default.publisher(for: NSWindow.didMoveNotification, object: panel)
-            .receive(on: RunLoop.main)
-            .sink { [weak self, weak panel] _ in
-                guard let self, let panel, self.panel === panel else { return }
-                UserDefaults.standard.set(NSStringFromPoint(panel.frame.origin), forKey: Self.originKey)
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didMoveNotification, object: panel, queue: .main
+        ) { note in
+            guard let window = note.object as? NSWindow else { return }
+            let origin = window.frame.origin
+            Task { @MainActor in
+                UserDefaults.standard.set(NSStringFromPoint(origin), forKey: Self.originKey)
             }
+        }
 
         // 模式切换 / 字号改变时重算面板尺寸（保持顶边不动）
         modeCancellable = Publishers.CombineLatest(
@@ -518,7 +523,6 @@ final class QuizOverlayController {
     func hide() {
         engine.stopSession()
         modeCancellable = nil
-        moveCancellable = nil
         panel?.orderOut(nil)
         panel = nil
         onVisibilityChanged?()
@@ -577,7 +581,6 @@ final class SlotKeyView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        NotificationCenter.default.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: nil)
         guard let window else { return }
         let ok = window.makeFirstResponder(self)
         NSLog("[SlotKeyView] viewDidMoveToWindow makeFirstResponder=%d isKey=%d", ok ? 1:0, window.isKeyWindow ? 1:0)
@@ -607,9 +610,14 @@ final class SlotKeyView: NSView {
         NSLog("[SlotKeyView] handleShortcutIfAny keyCode=%d mods=%d", keyCode, mods)
         for action in HotKeyAction.allCases {
             let binding = settings.hotKeys[action] ?? .none
-            guard binding.matches(keyCode: keyCode, modifiers: mods) else { continue }
-            // 拼写中的字母优先作为答案；选择模式仍可用配置的发音键。
-            if engine?.mode == .typing, mods == 0, let ch = event.charactersIgnoringModifiers?.first,
+            guard binding.keyCode == keyCode, binding.isSet else { continue }
+            // 精确匹配修饰键 → 直接处理
+            let exactMatch = binding.modifiers == mods
+            // 宽松匹配：事件有修饰键且 keyCode 匹配 → 也处理（系统可能吞掉或转换了修饰键）
+            let looseMatch = !exactMatch && mods != 0
+            guard exactMatch || looseMatch else { continue }
+            // 无修饰键的快捷键：可输入字符让位给输入，空格拦截为偷看
+            if exactMatch, mods == 0, let ch = event.charactersIgnoringModifiers?.first,
                ch.isLetter || ch == "-" || ch == "'" {
                 continue
             }
@@ -618,7 +626,7 @@ final class SlotKeyView: NSView {
                 NSLog("[SlotKeyView] skip (global handled): %@", action.rawValue)
                 return true
             }
-            NSLog("[SlotKeyView] shortcut matched %@", action.rawValue)
+            NSLog("[SlotKeyView] %@ %@", exactMatch ? "shortcut matched" : "loose matched", action.rawValue)
             // 有修饰键的快捷键——异步执行（避免在 keyDown 中销毁面板导致崩溃）
             if mods != 0 {
                 let capturedAction = action
@@ -654,10 +662,6 @@ final class SlotKeyView: NSView {
         guard let engine else { return super.keyDown(with: event) }
         // 快捷键优先
         if handleShortcutIfAny(event: event) { return }
-        guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
-            super.keyDown(with: event)
-            return
-        }
         switch event.keyCode {
         case 51:   // delete
             engine.deleteBackward()
@@ -724,7 +728,6 @@ final class PlainTypingView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        NotificationCenter.default.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: nil)
         guard let window else { return }
         let ok = window.makeFirstResponder(self)
         NSLog("[PlainTypingView] viewDidMoveToWindow makeFirstResponder=%d isKey=%d", ok ? 1:0, window.isKeyWindow ? 1:0)
@@ -753,9 +756,14 @@ final class PlainTypingView: NSView {
         NSLog("[PlainTypingView] handleShortcutIfAny keyCode=%d mods=%d", keyCode, mods)
         for action in HotKeyAction.allCases {
             let binding = settings.hotKeys[action] ?? .none
-            guard binding.matches(keyCode: keyCode, modifiers: mods) else { continue }
-            // 拼写中的字母优先作为答案；选择模式仍可用配置的发音键。
-            if engine?.mode == .typing, mods == 0, let ch = event.charactersIgnoringModifiers?.first,
+            guard binding.keyCode == keyCode, binding.isSet else { continue }
+            // 精确匹配修饰键 → 直接处理
+            let exactMatch = binding.modifiers == mods
+            // 宽松匹配：事件有修饰键且 keyCode 匹配 → 也处理（系统可能吞掉或转换了修饰键）
+            let looseMatch = !exactMatch && mods != 0
+            guard exactMatch || looseMatch else { continue }
+            // 无修饰键的快捷键：可输入字符让位给输入，空格拦截为偷看
+            if exactMatch, mods == 0, let ch = event.charactersIgnoringModifiers?.first,
                ch.isLetter || ch == "-" || ch == "'" {
                 continue
             }
@@ -764,7 +772,7 @@ final class PlainTypingView: NSView {
                 NSLog("[PlainTypingView] skip (global handled): %@", action.rawValue)
                 return true
             }
-            NSLog("[PlainTypingView] shortcut matched %@", action.rawValue)
+            NSLog("[PlainTypingView] %@ %@", exactMatch ? "shortcut matched" : "loose matched", action.rawValue)
             // 有修饰键的快捷键——异步执行（避免在 keyDown 中销毁面板导致崩溃）
             if mods != 0 {
                 let capturedAction = action
@@ -799,10 +807,6 @@ final class PlainTypingView: NSView {
         NSLog("[PlainTypingView] keyDown keyCode=%d chars=%@ engine=%d", event.keyCode, event.charactersIgnoringModifiers ?? "", engine == nil ? 0 : 1)
         guard let engine else { return super.keyDown(with: event) }
         if handleShortcutIfAny(event: event) { return }
-        guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
-            super.keyDown(with: event)
-            return
-        }
         // 选择模式：1-4 / A-D 直接选择选项；其他按键放行
         if engine.mode == .choice {
             guard let chars = event.charactersIgnoringModifiers?.lowercased(), let ch = chars.first else {

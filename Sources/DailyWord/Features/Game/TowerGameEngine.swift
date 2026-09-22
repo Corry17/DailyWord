@@ -26,7 +26,6 @@ final class TowerGameEngine: ObservableObject {
         let options: [String]
         let correctIndex: Int
         let spellHint: String
-        var pairs: [MatchPair] = []   // 词义连线配对（4 词 × 4 释义）
     }
 
     enum BattleMode: Equatable {
@@ -56,8 +55,6 @@ final class TowerGameEngine: ObservableObject {
         var consecutiveWrong: Int = 0       // 连续答错计数（用于惩罚递增）
         var lastAnswerCorrect: Bool?
         var chosenIndex: Int?
-        var perfect = false                 // 本题完美判定（连击 ≥3，伤害 ×1.5）
-        var weakened = false                // 破绽：组首领攻击减半
     }
 
     @Published private(set) var phase: Phase = .realm
@@ -83,54 +80,16 @@ final class TowerGameEngine: ObservableObject {
     @Published var showSkillPreview = false
     @Published private(set) var spriteMaxHP = 0
     @Published private(set) var floor = 1
-    /// 灵泉冷却：上次灵泉出现楼层（连续节点/事件不重复）
+    /// 灵泉冷却：上次灵泉出现楼层（连续节点不重复出灵泉）
     private var lastRestFloor: Int = -1
-    private var lastEventSpringFloor: Int = -1
     @Published private(set) var choices: [NodeType] = []
     @Published private(set) var battle: Battle?
     @Published private(set) var question: Question?
     @Published var spellInput = ""
-    /// 词义连线：玩家已完成的配对（词 → 释义）
-    @Published var matchAnswers: [String: String] = [:]
     @Published private(set) var toast: String?
     @Published private(set) var justClearedStageName = ""    // 刚通关的境界名（用于突破页展示）
     @Published private(set) var runInProgress = false        // 是否有进行中的修仙路（锁定角色）
     @Published private(set) var demonMode = false            // 魔化状态（魔界修炼）
-    /// 关卡组：单节点 = 连续多场战斗（2~5 关）
-    @Published private(set) var groupTotal = 0    // 关卡组总关数（0 = 非关卡组）
-    @Published private(set) var groupIndex = 0   // 当前第几关（1-based）
-    /// 组内选择：每战后玩家选择继续/休息/突击
-    @Published private(set) var groupChoices: [GroupChoice] = []
-    private var groupStages: [NodeType] = []     // 组内子关卡序列
-    private var groupEnemyName: String?          // 组内统一敌人名（贯穿全组）
-    private var groupEnemyIcon: String?          // 组内统一敌人图标
-    private var groupTomb = false                // 组是否为地下墓穴（组内统一判定一次）
-    /// 分叉口（S2）：本境固定楼层展开 2~3 条候选路线
-    @Published private(set) var branchRoutes: [RouteType] = []   // 当前分叉口候选路线
-    private var usedRoutes: Set<RouteType> = []                  // 本分叉口已走过的路线（灰显）
-    private var branchFloors: Set<Int> = []                      // 本境分叉口楼层（中段与后段至少各一）
-    private var currentRoute: RouteType = .steady                // 当前关卡组所属路线
-    /// 路线差异化参数（险路/秘路生效，平路为默认值）
-    private var groupDifficulty = 1.0    // 敌人血攻倍率（险路 1.3，秘路 0.8~1.5 随机）
-    private var groupRewardMult = 1.0    // 组奖励金币倍率（险路 2.0，秘路 0.5~3.0 随机）
-    private var groupTierBoost = 1.0     // 组通关掉落高品阶权重（险路 1.2）
-    private var groupCanRetreat = true   // 组内各关是否允许撤退（唯一选项时强制战斗）
-    /// 进入战斗/路线前的地图选择界面（撤退后原样恢复，不刷新关卡）
-    private var preGroupChoices: [NodeType] = []
-    private var preGroupRoutes: [RouteType] = []
-    /// 事件专属标记
-    private var eventRobber = false   // 劫匪拦路：失败扣金币不死亡
-    private var eventWordTide = false // 词妖潮：组完成不推进楼层
-    private var eventEarBomb = false  // 魔音灌耳：奖励后不推进楼层
-    private var eventMindTrial = false // 心魔幻境：同前
-    /// 事件 buff/debuff（下一个节点组生效）
-    private var eventDamageBuff = 0    // 下个节点组伤害 +N（词灵求救/天降奇遇）
-    private var eventPenaltyBuff = 0   // 下个节点组答错额外 +N（境界压制）
-    /// 关卡组的词汇分类（特定词汇节点如"衣物试炼"：组内所有小关都用该分类出题）
-    private var groupCategory: WordCategory?
-    /// 组内完美统计（S4 破绽机制：组首领战完美率 ≥60% 触发攻击减半）
-    private var groupPerfectCount = 0    // 组内完美（连击 ≥3）次数
-    private var groupAnswered = 0        // 组内答题总数
 
     // 永久进度
     @Published private(set) var unlockedStage: Int
@@ -241,19 +200,18 @@ final class TowerGameEngine: ObservableObject {
 
     // MARK: - 按稀有度概率抽取（高稀有度有隐藏境界门槛）
 
-    private func rollItems(count: Int, stageGate: Int, excludeOwned: Bool, tierBoost: Double = 1.0) -> [GameItem] {
+    private func rollItems(count: Int, stageGate: Int, excludeOwned: Bool) -> [GameItem] {
         var candidates = GameItem.catalog.filter { $0.tier.stageGate <= stageGate }
         if excludeOwned {
             candidates = candidates.filter { item in !inventory.contains(where: { $0.id == item.id }) }
         }
         var result: [GameItem] = []
         while result.count < count, !candidates.isEmpty {
-            // tierBoost > 1：高品阶权重放大（险路组通关掉落）
-            let total = candidates.reduce(0) { $0 + Int(Double($1.tier.weight) * tierBoost) }
+            let total = candidates.reduce(0) { $0 + $1.tier.weight }
             var roll = Int.random(in: 0..<max(1, total))
             var picked: GameItem?
             for item in candidates {
-                roll -= Int(Double(item.tier.weight) * tierBoost)
+                roll -= item.tier.weight
                 if roll < 0 { picked = item; break }
             }
             guard let picked else { break }
@@ -307,22 +265,7 @@ final class TowerGameEngine: ObservableObject {
     }
 
     func leaveMerchant() {
-        if groupTotal > 0 {
-            // 组内商人：离开后显示组内选择（继续/休息/突击）
-            var messages: [String] = ["🛒 购入物品"]
-            groupIndex += 1
-            if groupIndex < groupTotal {
-                makeGroupChoices()
-                phase = .map
-                toast = messages.joined(separator: "  ")
-            } else {
-                finishGroup(messages: &messages)
-                floor += 1
-                proceedToMap(messages: messages)
-            }
-        } else {
-            nextFloor()
-        }
+        nextFloor()
     }
 
     // MARK: - 装备/物品
@@ -334,160 +277,12 @@ final class TowerGameEngine: ObservableObject {
     func equip(_ owned: OwnedItem) {
         guard let item = owned.item, let key = item.category.equipKey else { return }
         equipped[key] = owned.id
-        // 宠物/精灵：根据品阶设定生命点
-        if item.category == .pet {
-            petMaxHP = tierToPetMaxHP(item.tier)
-            petHP = petMaxHP
-        } else if item.category == .sprite {
-            spriteMaxHP = tierToPetMaxHP(item.tier)
-            spriteHP = spriteMaxHP
-        }
         persistWealth()
     }
 
     func unequip(_ key: String) {
         equipped[key] = nil
-        if key == "pet" { petHP = 0; petMaxHP = 0 }
-        if key == "sprite" { spriteHP = 0; spriteMaxHP = 0 }
         persistWealth()
-    }
-
-    /// 宠物/精灵品阶→基础生命（低 6 / 中 10 / 高 14 / 稀 18 / 传奇+ 22 / 魔器 26）
-    private func tierToPetMaxHP(_ tier: ItemTier) -> Int {
-        switch tier {
-        case .low: return 6
-        case .mid: return 10
-        case .high: return 14
-        case .rare: return 18
-        case .legendary, .goldLegend: return 22
-        case .demon: return 26
-        }
-    }
-
-    /// 从已装备项刷新宠物/精灵最大生命与当前生命（闯关之路重启时调用）
-    private func refreshPetSpriteHP() {
-        if let petId = equipped["pet"],
-           let owned = inventory.first(where: { $0.id == petId }),
-           let item = owned.item, item.category == .pet {
-            petMaxHP = tierToPetMaxHP(item.tier)
-            petHP = petMaxHP
-        } else {
-            petHP = 0; petMaxHP = 0
-        }
-        if let spriteId = equipped["sprite"],
-           let owned = inventory.first(where: { $0.id == spriteId }),
-           let item = owned.item, item.category == .sprite {
-            spriteMaxHP = tierToPetMaxHP(item.tier)
-            spriteHP = spriteMaxHP
-        } else {
-            spriteHP = 0; spriteMaxHP = 0
-        }
-        persistAll()
-    }
-
-    // MARK: - 宠物/精灵状态与战斗技能
-
-    /// 状态枚举（按 HP 比例）
-    enum PetSpriteState: Equatable { case healthy, injured, critical, gone }
-
-    /// 宠物当前状态
-    var petState: PetSpriteState {
-        guard petMaxHP > 0 else { return .gone }
-        let ratio = Double(petHP) / Double(petMaxHP)
-        if ratio > 0.66 { return .healthy }
-        if ratio > 0.33 { return .injured }
-        return .critical
-    }
-
-    /// 精灵当前状态
-    var spriteState: PetSpriteState {
-        guard spriteMaxHP > 0 else { return .gone }
-        let ratio = Double(spriteHP) / Double(spriteMaxHP)
-        if ratio > 0.66 { return .healthy }
-        if ratio > 0.33 { return .injured }
-        return .critical
-    }
-
-    /// 根据状态计算技能触发概率（健康 35% / 受伤 20% / 濒死 8%）
-    private func petSkillChance(_ state: PetSpriteState) -> Int {
-        switch state { case .healthy: return 35; case .injured: return 20; case .critical: return 8; case .gone: return 0 }
-    }
-
-    /// 答对时触发宠物/精灵技能（各品阶自带效果随机激活）
-    private func activatePetSpriteSkill(battle: inout Battle) -> String? {
-        // 先检查宠物
-        if let petId = equipped["pet"], petHP > 0,
-           let owned = inventory.first(where: { $0.id == petId }),
-           let item = owned.item, item.category == .pet,
-           Int.random(in: 0..<100) < petSkillChance(petState) {
-            petHP = max(0, petHP - 1)  // 使用技能消耗 1 血
-            if let msg = applyPetSkill(item, battle: &battle) { return "🐾 \(msg)" }
-        }
-        // 再检查精灵
-        if let spriteId = equipped["sprite"], spriteHP > 0,
-           let owned = inventory.first(where: { $0.id == spriteId }),
-           let item = owned.item, item.category == .sprite,
-           Int.random(in: 0..<100) < petSkillChance(spriteState) {
-            spriteHP = max(0, spriteHP - 1)  // 使用技能消耗 1 血
-            if let msg = applyPetSkill(item, battle: &battle) { return "✨ \(msg)" }
-        }
-        return nil
-    }
-
-    /// 应用宠物/精灵技能效果（按物品自身属性）
-    private func applyPetSkill(_ item: GameItem, battle: inout Battle) -> String? {
-        if item.damageBonus > 0 {
-            battle.enemyHP = max(0, battle.enemyHP - item.damageBonus)
-            return "\(item.name)助攻 +\(item.damageBonus) 伤害！"
-        }
-        if item.regenPerWin > 0 {
-            hp = min(maxHP, hp + item.regenPerWin)
-            return "\(item.name)治疗 +\(item.regenPerWin)"
-        }
-        if item.coinBonus > 0 {
-            coins += item.coinBonus
-            return "\(item.name)寻得 +\(item.coinBonus) 金币"
-        }
-        if item.defenseBonus > 0 {
-            battle.shieldAvailable = true
-            return "\(item.name)护主，下次免伤"
-        }
-        if item.timeBonus > 0, battle.isTimed {
-            battle.timeLeft += item.timeBonus
-            return "\(item.name)延滞 +\(item.timeBonus) 秒"
-        }
-        return nil
-    }
-
-    /// 答错时宠物/精灵承受 1 点伤害；0 血时自动离去
-    private func damagePetSpriteOnWrong() {
-        if petHP > 0 {
-            petHP = max(0, petHP - 1)
-            if petHP == 0 {
-                equipped["pet"] = nil
-                toast = "🐾 宠物力竭离去…"
-            }
-        }
-        if spriteHP > 0 {
-            spriteHP = max(0, spriteHP - 1)
-            if spriteHP == 0 {
-                equipped["sprite"] = nil
-                toast = "✨ 精灵灵力散尽…"
-            }
-        }
-        if petHP == 0 || spriteHP == 0 { persistWealth() }
-    }
-
-    /// 检查宠物/精灵是否 HP=0（战斗结束后清理）
-    private func checkPetSpriteDeath() {
-        if petHP == 0, equipped["pet"] != nil {
-            equipped["pet"] = nil
-            toast = (toast ?? "") + " 🐾 宠物力竭离去"
-        }
-        if spriteHP == 0, equipped["sprite"] != nil {
-            equipped["sprite"] = nil
-            toast = (toast ?? "") + " ✨ 精灵灵力散尽"
-        }
     }
 
     func isEquipped(_ item: GameItem) -> Bool {
@@ -580,7 +375,6 @@ final class TowerGameEngine: ObservableObject {
         advanceTask?.cancel()
         battle = nil
         question = nil
-        resetGroup()                 // 回首页：结束进行中的关卡组
         refreshShopIfNeeded()
         phase = .realm
     }
@@ -773,42 +567,8 @@ final class TowerGameEngine: ObservableObject {
         beginRun(as: heroClass, demonic: false)
     }
 
-    /// 清空所有运行时状态（每次重新开始/继续闯关之路时调用；背包/金币/穿戴/图鉴等永久数据保留）
-    private func resetRunState() {
-        stopTimer()
-        advanceTask?.cancel()
-        battle = nil
-        question = nil
-        spellInput = ""
-        choices = []
-        preGroupChoices = []
-        preGroupRoutes = []
-        eventRobber = false
-        eventWordTide = false
-        eventEarBomb = false
-        eventMindTrial = false
-        eventDamageBuff = 0
-        eventPenaltyBuff = 0
-        resetGroup()
-        branchRoutes = []
-        usedRoutes = []
-        branchFloors = []
-        usedCategoryIds = []
-        recentWordIds = []
-        lastRestFloor = -1          // 灵泉冷却重置
-        lastEventSpringFloor = -1
-        shortcutPending = false
-        retreatConfirming = false
-        showSkillPreview = false
-        justClearedStageName = ""
-        demonMode = false
-        toast = nil
-        UserDefaults.standard.removeObject(forKey: "towerBattleTimeLeft")
-    }
-
     private func beginRun(as heroClass: HeroClass, demonic: Bool) {
         clearSave()                    // 新一轮闯关之路：彻底重开（清残留存档）
-        resetRunState()                // 清空所有运行时状态（战斗/组/地图/冷却等）
         loadPool()
         guard pool.count >= 8 else { return }
         hero = heroClass
@@ -822,21 +582,15 @@ final class TowerGameEngine: ObservableObject {
             maxHP = heroClass.maxHP
             hp = maxHP
         }
-        // 重置宠物/精灵生命（重新从已装备项读取）
-        refreshPetSpriteHP()
-        // 重新开始：解锁进度回到凡人，闯关之路从第一境重新显示（通关记录 winCount 保留）
-        unlockedStage = 1
-        pathCompleted = false
-        UserDefaults.standard.set(unlockedStage, forKey: "towerUnlockedStage")
-        UserDefaults.standard.set(false, forKey: "towerPathCompleted")
-        floor = 1
-        branchFloors = Self.makeBranchFloors(floors: stage.floors)   // 本境分叉口楼层
-        saveRun()
-        makeChoices()
-        phase = .map
         if hero == .demon {
             toast = "😈 不死不灭：生命恒为 0 以下；但魔气越深越危险——负血加深，受击灰飞烟灭的概率越高！"
         }
+        floor = 1
+        usedCategoryIds = []
+        recentWordIds = []
+        saveRun()
+        makeChoices()
+        phase = .map
     }
 
     // MARK: - 存档
@@ -950,7 +704,6 @@ final class TowerGameEngine: ObservableObject {
         }
         loadPool()
         guard pool.count >= 8 else { return }
-        resetRunState()                 // 清空运行时残留状态（战斗/组/冷却等）
         hero = heroClass
         demonMode = (save["demon"] as? Bool) ?? false
         stage = savedStage
@@ -959,9 +712,6 @@ final class TowerGameEngine: ObservableObject {
         floor = min(savedFloor, savedStage.floors)
         usedCategoryIds = Set(save["usedCats"] as? [String] ?? [])
         recentWordIds = []
-        branchFloors = Self.makeBranchFloors(floors: stage.floors)
-        usedRoutes = []
-        branchRoutes = []
         makeChoices()
         phase = .map
     }
@@ -981,7 +731,11 @@ final class TowerGameEngine: ObservableObject {
     }
 
     private var availableKinds: [QuestionKind] {
-        QuestionKind.available(stageIndex: stage.index)
+        var kinds: [QuestionKind] = [.enToCn, .cnToEn, .spell]
+        if pool.filter({ ($0.definitionEn ?? "").count > 10 }).count >= 12 {
+            kinds.append(.engDef)
+        }
+        return kinds
     }
 
     private func randomKind() -> QuestionKind {
@@ -994,9 +748,26 @@ final class TowerGameEngine: ObservableObject {
             choices = [.boss]
             return
         }
-        // S2 分叉口：本境固定楼层展开路线选择（险路/平路/秘路）
-        if branchFloors.contains(floor) {
-            makeBranchRoutes()
+        // 岔路：从第 2 节点起可能出现“捷径 vs 绕行”（距边界还有至少 2 步时）
+        let canBranch = floor >= 2 && floor + 1 < stage.floors
+        if canBranch && Int.random(in: 0..<100) < 55 {
+            var routes: [NodeType] = [
+                .elite(kind: randomKind()),                       // 捷径：短而难（小Boss）
+                .battle(category: nil, kind: randomKind())         // 绕行：长而易
+            ]
+            if let category = availableCategories.shuffled().first {
+                routes.append(.battle(category: category, kind: randomKind()))
+            }
+            if (hp <= maxHP * 0.5 || (hero == .demon && hp <= -3)), floor != lastRestFloor {
+            // 灵泉概率：血越低越高，封顶 10%
+            let restChance = hero == .demon
+                ? min(10, max(2, -hp * 2))
+                : min(10, max(2, Int((1 - Double(hp) / Double(max(1, maxHP))) * 12)))
+            if Int.random(in: 0..<100) < restChance { routes.append(.rest) }
+        }
+            var unique: [NodeType] = []
+            for node in routes where !unique.contains(node) { unique.append(node) }
+            choices = Array(unique.prefix(3))
             return
         }
 
@@ -1006,7 +777,7 @@ final class TowerGameEngine: ObservableObject {
         }
         if floor >= 3 { candidates.append(.elite(kind: randomKind())) }
         if floor >= 2 { candidates.append(.timedTrial(kind: randomKind())) }
-        if (hp * 2 <= maxHP || (hero == .demon && hp <= -3)), floor != lastRestFloor {
+        if (hp <= maxHP * 0.5 || (hero == .demon && hp <= -3)), floor != lastRestFloor {
             let restChance = hero == .demon
                 ? min(10, max(2, -hp * 2))
                 : min(10, max(2, Int((1 - Double(hp) / Double(max(1, maxHP))) * 12)))
@@ -1023,24 +794,15 @@ final class TowerGameEngine: ObservableObject {
 
     func choose(_ node: NodeType) {
         guard phase == .map else { return }
-        // 撤退限制：当前只剩一个可选节点时必须打（不可撤退）
-        let forced = choices.count == 1
-        // 暂存当前选择界面（撤退后原样恢复，不刷新关卡）
-        preGroupChoices = choices
-        preGroupRoutes = []
         switch node {
         case .rest:
             hp = min(maxHP, hp + 15)
             lastRestFloor = floor
-            // 宠物/精灵同享灵泉滋养：各恢复一半生命
-            if petMaxHP > 0 { petHP = min(petMaxHP, petHP + max(1, petMaxHP / 2)) }
-            if spriteMaxHP > 0 { spriteHP = min(spriteMaxHP, spriteHP + max(1, spriteMaxHP / 2)) }
             toast = hero == .demon
                 ? "🔥 魔气滋养，回复 15 点（当前 \(hp)）"
                 : "💧 灵泉涤体，恢复 15 点生命（\(hp)/\(maxHP)）"
             // 灵泉不消耗节点楼层：回血后继续在当前楼层选下一个节点
             saveRun()
-            persistAll()          // 宠物/精灵生命持久化
             makeChoices()
             phase = .map
             return
@@ -1051,207 +813,14 @@ final class TowerGameEngine: ObservableObject {
         case .battle(let category, _):
             if let category { usedCategoryIds.insert(category.id) }
             shortcutPending = false
-            startGroup(node: node, canRetreat: !forced)
+            enterBattle(node, mode: .standard)
         case .elite:
             // 捷径：小 Boss 难，但胜利后直接跳过一个节点（路短）
             shortcutPending = true
-            enterBattle(node, mode: .standard, canRetreat: !forced)
+            enterBattle(node, mode: .standard)
         default:
             shortcutPending = false
-            enterBattle(node, mode: .standard, canRetreat: !forced)
-        }
-    }
-
-    // MARK: - 关卡组（单节点 = 2~5 场连续战斗）
-
-    /// 当前境界段位的关卡组关数（1~4 境 2 关 … 14~16 境 5 关）
-    var groupCount: Int {
-        switch stage.index {
-        case 1...4: return 2
-        case 5...9: return 3
-        case 10...13: return 4
-        default: return 5
-        }
-    }
-
-    /// 指定节点的关卡组关数（仅 battle 节点是关卡组；其余返回 0）
-    func groupCount(for node: NodeType) -> Int {
-        guard case .battle = node else { return 0 }
-        return groupCount
-    }
-
-    /// 启动关卡组：统一敌人名/图标贯穿全组 + 应用路线差异化参数
-    private func beginGroup(stages: [NodeType], difficulty: Double, rewardMult: Double, tierBoost: Double,
-                            canRetreat: Bool = true, category: WordCategory? = nil) {
-        groupCanRetreat = canRetreat   // 组内各关撤退许可（唯一选项时强制战斗）
-        groupCategory = category       // 特定词汇分类贯穿全组（精英/限时关也出同类词）
-        let minion = stage.minions.randomElement()!
-        // 地下墓穴：组内统一判定一次，全组一致（避免中途换名/换图标）
-        groupTomb = Int.random(in: 0..<(hero == .demon ? 200 : 1000)) == 0
-        // 组内敌人：同一名字/图标贯穿全组（魔修视角在此统一改名一次）
-        var name = minion.name
-        if hero == .demon, !groupTomb, Int.random(in: 0..<100) >= 15 {
-            name = Self.demonEnemyMinions.randomElement() ?? name
-        }
-        groupEnemyName = name
-        groupEnemyIcon = minion.icon
-        groupDifficulty = difficulty
-        groupRewardMult = rewardMult
-        groupTierBoost = tierBoost
-        groupStages = stages
-        groupTotal = groupStages.count
-        groupIndex = 1
-        // 用 advanceGroup 启动：组首关也可能是灵泉/商人（秘路混合组）
-        var bootMessages: [String] = []
-        advanceGroup(messages: &bootMessages)
-        if phase == .battle, !bootMessages.isEmpty {
-            toast = bootMessages.joined(separator: "  ")
-        }
-    }
-
-    /// 普通节点启动关卡组：按境界段位生成 2~5 关，标准难度/收益
-    private func startGroup(node: NodeType, canRetreat: Bool = true) {
-        let category: WordCategory?
-        if case .battle(let cat, _) = node { category = cat } else { category = nil }
-        beginGroup(stages: makeGroupStages(for: node), difficulty: 1.0, rewardMult: 1.0, tierBoost: 1.0,
-                   canRetreat: canRetreat, category: category)
-    }
-
-    /// 组内子关卡序列（普通×N + 精英/限时 + 收尾/组首领）
-    /// 组内小关混合题型：第一关与节点显示一致，后续关随机题型（避免整组同一种类型）
-    private func makeGroupStages(for node: NodeType) -> [NodeType] {
-        guard case .battle(let category, let kind) = node else { return [] }
-        let normal = NodeType.battle(category: category, kind: kind)                    // 第一关：节点题型
-        let normalB = NodeType.battle(category: category, kind: randomKind())           // 后续普通关：随机题型
-        let elite = NodeType.elite(kind: randomKind())
-        let timed = NodeType.timedTrial(kind: randomKind())
-        switch stage.index {
-        case 1...4:   // 2 关：普通×1 + 收尾×1
-            return [normal, elite]
-        case 5...9:   // 3 关：普通×2 + 精英×1
-            return [normal, normalB, elite]
-        case 10...13: // 4 关：普通×2 + 玩法/限时×1 + 精英×1
-            return [normal, normalB, Bool.random() ? timed : NodeType.battle(category: category, kind: randomKind()), elite]
-        default:      // 5 关：普通×2 + 限时×1 + 玩法/精英×1 + 组首领×1
-            return [normal, normalB, timed,
-                    Bool.random() ? NodeType.battle(category: category, kind: randomKind()) : elite, elite]
-        }
-    }
-
-    /// 关卡组通关回血（按段位；魔修 maxHP=0 自动向 0 回升）
-    private func groupClearHeal() -> Int {
-        switch stage.index {
-        case 1...4: return 8
-        case 5...9: return 5
-        case 10...13: return 3
-        default: return 0
-        }
-    }
-
-    /// 结束关卡组（组通关 / 撤退 / 死亡时调用，清空组进度）
-    private func resetGroup() {
-        groupStages = []
-        groupTotal = 0
-        groupIndex = 0
-        groupChoices = []
-        groupEnemyName = nil
-        groupEnemyIcon = nil
-        groupTomb = false
-        groupDifficulty = 1.0
-        groupRewardMult = 1.0
-        groupTierBoost = 1.0
-        groupCanRetreat = true
-        groupCategory = nil
-        eventDamageBuff = 0
-        eventPenaltyBuff = 0
-        groupPerfectCount = 0
-        groupAnswered = 0
-        currentRoute = .steady
-    }
-
-    // MARK: - 分叉口（S2：路线选择）
-
-    /// 本境分叉口楼层：1~3 个（地图中段与后段至少各一），太短的地图不设
-    static func makeBranchFloors(floors: Int) -> Set<Int> {
-        guard floors >= 4 else { return [] }
-        var set: Set<Int> = []
-        let mid = max(2, floors / 2)
-        let late = max(mid + 1, min(floors - 1, floors * 3 / 4))
-        set.insert(mid)
-        if late <= floors - 1 { set.insert(late) }
-        // 第三处约 1/3 概率（生成时固定，撤退后不变）
-        if set.count < 3, Int.random(in: 0..<3) == 0,
-           let extra = (2..<floors).filter({ !set.contains($0) }).randomElement() {
-            set.insert(extra)
-        }
-        return set
-    }
-
-    /// 生成分叉口候选路线（险路 + 平路 + 40% 秘路；已走过的灰显不可重复选）
-    private func makeBranchRoutes() {
-        var routes: [RouteType] = [.perilous, .steady]
-        if Int.random(in: 0..<100) < 40 { routes.append(.mystery) }
-        // 全部路线都尝试过：重置（避免卡死在分叉口）
-        if routes.allSatisfy({ usedRoutes.contains($0) }) {
-            usedRoutes.removeAll()
-        }
-        branchRoutes = routes
-        choices = []
-    }
-
-    /// 已走过的路线（灰显不可重复选）
-    func isRouteUsed(_ route: RouteType) -> Bool {
-        usedRoutes.contains(route)
-    }
-
-    /// 选择路线：启动差异化关卡组（险路强收益 / 平路标准 / 秘路随机）
-    func chooseRoute(_ route: RouteType) {
-        guard phase == .map, !branchRoutes.isEmpty, !isRouteUsed(route) else { return }
-        // 暂存当前分叉口路线界面（撤退后原样恢复，不刷新关卡）
-        preGroupRoutes = branchRoutes
-        preGroupChoices = []
-        // 撤退限制：可用路线只剩一条时强制战斗（不可撤退）
-        let availableCount = branchRoutes.filter { !usedRoutes.contains($0) }.count
-        usedRoutes.insert(route)
-        branchRoutes = []
-        currentRoute = route
-        let kind = randomKind()
-        switch route {
-        case .perilous:
-            // 2 关（组首领强）：普通 + 精英；敌人 +30% 血攻；组奖励 ×2；高品阶掉落 ↑
-            beginGroup(stages: [.battle(category: nil, kind: kind), .elite(kind: kind)],
-                       difficulty: 1.3, rewardMult: 2.0, tierBoost: 1.2, canRetreat: availableCount > 1)
-        case .steady:
-            // 3 关：普通×2 + 精英；标准难度/收益
-            beginGroup(stages: [.battle(category: nil, kind: kind),
-                                .battle(category: nil, kind: kind),
-                                .elite(kind: kind)],
-                       difficulty: 1.0, rewardMult: 1.0, tierBoost: 1.0, canRetreat: availableCount > 1)
-        case .mystery:
-            // 随机 2~4 关：普通/限时/灵泉/商人混合 + 组首领；难度/收益随机（可能大赚或血亏）
-            var stages: [NodeType] = []
-            let count = Int.random(in: 2...4)
-            for i in 0..<count {
-                if i == count - 1 {
-                    stages.append(.elite(kind: kind))     // 组首领必在
-                } else {
-                    let roll = Int.random(in: 0..<100)
-                    if roll < 15 {
-                        stages.append(.rest)              // 组内灵泉：自动回血
-                    } else if roll < 30 {
-                        stages.append(.merchant)          // 组内商人：弹商店
-                    } else if roll < 55 {
-                        stages.append(.timedTrial(kind: kind))
-                    } else {
-                        stages.append(.battle(category: nil, kind: kind))
-                    }
-                }
-            }
-            beginGroup(stages: stages,
-                       difficulty: Double.random(in: 0.8...1.5),
-                       rewardMult: [0.5, 1.0, 1.5, 2.0, 3.0].randomElement() ?? 1.0,
-                       tierBoost: 1.0,
-                       canRetreat: availableCount > 1)
+            enterBattle(node, mode: .standard)
         }
     }
 
@@ -1259,22 +828,8 @@ final class TowerGameEngine: ObservableObject {
         floor += 1
         saveRun()
         if floor < stage.floors, floor > 1, Int.random(in: 0..<100) < 22 {
-            // 按段位扩充事件池（低段位保留原三种，高段位解锁新事件）
-            var pool: [TowerEvent] = [.forced, .opportunity, .trial]
-            if stage.index >= 5 { pool.append(.wordTide) }
-            if stage.index >= 5 { pool.append(.ruins) }
-            // 灵泉现世：只在血量 ≤70% 时进入候选，且不与上回重复
-            if stage.index >= 5, floor != lastEventSpringFloor, hp * 10 <= maxHP * 7 {
-                pool.append(.spring)
-            }
-            if stage.index >= 10 { pool.append(.robber) }
-            if stage.index >= 5 { pool.append(.earBomb) }
-            if stage.index >= 10 { pool.append(.mindTrial) }
-            if stage.index >= 5 { pool.append(.forkRoad) }
-            if stage.index >= 5, coins >= 30 { pool.append(.wordSpirit) }
-            if stage.index >= 5 { pool.append(.luckFall) }
-            if stage.index >= 14 { pool.append(.realmSuppress) }
-            phase = .event(pool.randomElement() ?? .forced)
+            let event: TowerEvent = [.forced, .opportunity, .trial].randomElement()!
+            phase = .event(event)
             return
         }
         makeChoices()
@@ -1282,36 +837,6 @@ final class TowerGameEngine: ObservableObject {
     }
 
     // MARK: - 突发事件
-
-    /// 选择上古遗迹宝箱
-    func selectRuinsOption(_ index: Int) {
-        guard phase == .event(.ruins), index >= 0, index < ruinsOptions.count else { return }
-        ruinsOptions = []
-        switch index {
-        case 0: // 金币
-            coins += 20
-            toast = "🏛️ 打开宝箱，获得 💰 +20 金币！"
-        case 1: // 随机装备
-            if let drop = rollItems(count: 1, stageGate: stage.index, excludeOwned: false).first {
-                gainItem(drop)
-                toast = "🏛️ 打开宝箱，获得 \(drop.name)！"
-            } else { toast = "🏛️ 宝箱空空如也……" }
-        default: // 未知宝箱：50% 扣血 / 50% 金币
-            if Bool.random() {
-                let dmg = Int.random(in: 3...6)
-                hp = hero == .demon ? hp - dmg : max(1, hp - dmg)
-                toast = "☠️ 宝箱里弹出陷阱，-\(dmg) 血！"
-            } else {
-                coins += 25
-                toast = "🎉 宝箱里金光闪闪，💰 +25 金币！"
-            }
-        }
-        makeChoices()
-        phase = .map
-    }
-
-    /// 上古遗迹三选一
-    @Published var ruinsOptions: [String] = []
 
     func acceptEvent(_ event: TowerEvent) {
         switch event {
@@ -1321,96 +846,14 @@ final class TowerGameEngine: ObservableObject {
             enterBattle(.elite(kind: randomKind()), mode: .opportunity)
         case .trial:
             enterBattle(.timedTrial(kind: randomKind()), mode: .trial)
-        case .spring:
-            // 灵泉现世：回复 10~15 血
-            let heal = Int.random(in: 10...15)
-            hp = hero == .demon ? min(0, hp + heal) : min(maxHP, hp + heal)
-            lastEventSpringFloor = floor
-            toast = hero == .demon ? "🔥 魔泉滋养 +\(heal)" : "💧 灵泉涤体 +\(heal)"
-            makeChoices()
-            phase = .map
-        case .robber:
-            // 劫匪拦路：强制一战，胜利无事，失败扣 30% 金币（不死亡）
-            eventRobber = true
-            enterBattle(.battle(category: nil, kind: randomKind()), mode: .standard, eventBoost: true, canRetreat: false)
-        case .ruins:
-            // 上古遗迹：三选一宝箱
-            ruinsOptions = ["💰 金币 +20", "🎁 随机装备", "☠️ 未知宝箱"]
-            phase = .event(event)
-        case .wordTide:
-            // 词妖潮：连续 3 场小怪战
-            eventWordTide = true
-            let stages = (0..<3).map { _ in NodeType.battle(category: nil, kind: randomKind()) }
-            var boot: [String] = []
-            groupCanRetreat = false
-            groupCategory = nil
-            groupStages = stages
-            groupTotal = stages.count
-            groupIndex = 1
-            advanceGroup(messages: &boot)
-            if phase == .battle, !boot.isEmpty { toast = boot.joined(separator: "  ") }
-        case .earBomb:
-            // 魔音灌耳：3 道听音题（trial 模式，答错不扣血，20 秒限时）
-            eventEarBomb = true
-            enterBattle(.timedTrial(kind: .listen), mode: .trial)
-        case .mindTrial:
-            // 心魔幻境：5 道限时题（答对 N 题发 N×5 金币；0 题扣 6 血）
-            eventMindTrial = true
-            enterBattle(.timedTrial(kind: randomKind()), mode: .trial)
-        case .forkRoad:
-            // 迷雾岔路：随机结果（50% 战斗 / 50% 宝藏）
-            if Int.random(in: 0..<100) < 50 {
-                enterBattle(.battle(category: nil, kind: randomKind()), mode: .standard, canRetreat: false)
-            } else {
-                let gold = Int.random(in: 10...25)
-                coins += gold
-                toast = "🌫️ 岔路尽头发现了一处宝藏，获得 💰 +\(gold) 金币！"
-                makeChoices()
-                phase = .map
-            }
-        case .wordSpirit:
-            // 词灵求救：花 30 金换下个节点组伤害 +2
-            coins -= 30
-            eventDamageBuff += 2
-            toast = "🧚 词灵感激不尽，接下来的战斗中它将助你一臂之力！"
-            makeChoices()
-            phase = .map
-        case .luckFall:
-            // 天降奇遇：免费 buff（伤害 +2）
-            eventDamageBuff += 2
-            toast = "✨ 祥光入体，下个节点组伤害 +2！"
-            makeChoices()
-            phase = .map
-        case .realmSuppress:
-            // 境界压制：本节点组答错惩罚 +1
-            eventPenaltyBuff += 1
-            toast = "⚡ 灵气紊乱——下个节点组答错将额外承受 1 点伤害！"
-            makeChoices()
-            phase = .map
         }
     }
 
     func declineEvent(_ event: TowerEvent) {
-        switch event {
-        case .spring, .ruins, .forkRoad, .wordSpirit, .realmSuppress:
-            // 可选绕行
-            makeChoices()
-            phase = .map
-            let msgs: [TowerEvent: String] = [.spring: "你绕过了灵泉，继续赶路",
-                                               .ruins: "你离开了遗迹，继续赶路",
-                                               .forkRoad: "你随便选了一条路走了出去",
-                                               .wordSpirit: "你叹了口气，继续赶路",
-                                               .realmSuppress: "你绕开了压制区域，绕了个远路"]
-            toast = msgs[event, default: "继续赶路"]
-        case .forced, .robber, .wordTide, .earBomb, .mindTrial, .luckFall:
-            // 不可拒绝
-            return
-        case .trial, .opportunity:
-            // 原有可拒绝事件
-            makeChoices()
-            phase = .map
-            toast = event == .opportunity ? "你绕开了秘宝洞窟，继续赶路" : "灵光消散，继续赶路"
-        }
+        guard event != .forced else { return }
+        makeChoices()
+        phase = .map
+        toast = "你绕开了\(event == .opportunity ? "秘宝洞窟" : "灵光")，继续赶路"
     }
 
     // MARK: - 战斗
@@ -1440,8 +883,7 @@ final class TowerGameEngine: ObservableObject {
             enemyHP = mode == .trial ? (3 + power / 3) : 5 + power
             attack = 2 + power / 2          // 小怪攻击提速
             timed = true
-            // S4 限时压力：秘境守卫 60 秒起随境界递减至 30 秒
-            timeLimit = mode == .trial ? 20 : max(30, 60 - power * 2)
+            timeLimit = mode == .trial ? 20 : 45
             reward = mode == .trial ? 10 : 12 + power * 2
         case .boss:
             enemyName = stage.bossName
@@ -1464,9 +906,8 @@ final class TowerGameEngine: ObservableObject {
         }
 
         // 神秘关卡：地下墓穴（普通职业 1/1000；魔修与墓穴契合，感知概率 1/200；非 Boss 战）
-        // 关卡组内统一判定一次（groupTomb 在 startGroup 时确定），保证整组敌人一致
         let tombRoll = hero == .demon ? 200 : 1000
-        let inTomb = node != .boss && (groupTotal > 0 ? groupTomb : Int.random(in: 0..<tombRoll) == 0)
+        let inTomb = node != .boss && Int.random(in: 0..<tombRoll) == 0
         if inTomb {
             // 地下墓穴：神秘关卡的难度与奖励（守卫更强）
             enemyHP = Int(Double(enemyHP) * 1.6)
@@ -1479,28 +920,14 @@ final class TowerGameEngine: ObservableObject {
         }
         if mode == .opportunity { reward = 14 + stage.index * 3 }
 
-        // 路线差异化：险路/秘路按组难度系数放大敌人血攻
-        enemyHP = max(3, Int(Double(enemyHP + difficulty.enemyHPMod) * groupDifficulty))
-        attack = max(2, Int(Double(attack + difficulty.attackMod) * groupDifficulty))
-        // S4 组首领：组内最后一关 +50% 血攻
-        if groupTotal > 0, groupIndex == groupTotal {
-            enemyHP = Int(Double(enemyHP) * 1.5)
-            attack = Int(Double(attack) * 1.5)
-        }
-        // S4 破绽：组内完美率 ≥60% 时组首领攻击减半（答好题 → 打得更轻松）
-        var weakened = false
-        if groupTotal > 0, groupIndex == groupTotal, groupAnswered >= 3,
-           groupPerfectCount * 5 >= groupAnswered * 3 {
-            attack = max(1, attack / 2)
-            weakened = true
-        }
+        enemyHP = max(3, enemyHP + difficulty.enemyHPMod)
+        attack = max(2, attack + difficulty.attackMod)
         if timed { timeLimit += equipEffects.time }
 
         let disabled = ability == .disableSkill
         let retreatAllowed = canRetreat && node != .boss
         // 魔修视角：敌人多为正道修士，偶尔遭遇同族魔道（15% 保持原名）
-        // 关卡组内不在此改名：组启动时已按英雄视角统一（见 startGroup）
-        if hero == .demon, groupTotal == 0, !inTomb, Int.random(in: 0..<100) >= 15 {
+        if hero == .demon, !inTomb, Int.random(in: 0..<100) >= 15 {
             switch node {
             case .boss:
                 enemyName = Self.demonEnemyBosses[stage.index % Self.demonEnemyBosses.count]
@@ -1509,11 +936,6 @@ final class TowerGameEngine: ObservableObject {
             default:
                 enemyName = Self.demonEnemyMinions.randomElement() ?? enemyName
             }
-        }
-        // 关卡组：组内所有子关卡共用同一敌人名/图标（组启动时已统一；墓穴组保持墓穴守卫）
-        if groupTotal > 0, !inTomb, let gName = groupEnemyName, let gIcon = groupEnemyIcon {
-            enemyName = gName
-            enemyIcon = gIcon
         }
         battle = Battle(
             node: node,
@@ -1532,14 +954,12 @@ final class TowerGameEngine: ObservableObject {
             ability: ability,
             skillsDisabled: disabled,
             canRetreat: retreatAllowed,
-            isTomb: inTomb,
-            weakened: weakened
+            isTomb: inTomb
         )
         spellInput = ""
         phase = .battle
         if ability != .none { showSkillPreview = true }   // 有技能怪物进入战斗前弹出预览
-        // 墓穴提示仅在组第一关（或非组战斗）显示一次，避免覆盖组内连战消息
-        if inTomb, groupIndex <= 1 { toast = "⚰️ 你误入神秘关卡——地下墓穴！" }
+        if inTomb { toast = "⚰️ 你误入神秘关卡——地下墓穴！" }
         if disabled { toast = "🏀 \(enemyName)：唱！跳！rap！篮球！——你的技能被封印了！" }
         nextQuestion()
         if timed { startTimer() }
@@ -1548,22 +968,14 @@ final class TowerGameEngine: ObservableObject {
     private func questionPool(for node: NodeType) -> [Word] {
         let window = difficultyWindow()
         let base = window.isEmpty ? pool : window
-        // 分类：节点自带分类优先；否则用关卡组分类（特定词汇关卡如"衣物试炼"贯穿全组）
-        let category: WordCategory?
-        if case .battle(let cat?, _) = node {
-            category = cat
-        } else {
-            category = groupCategory
-        }
-        if let category {
+        if case .battle(let category?, _) = node {
+            // 优先窗口内同类（用 Set 快速过滤缓存）
             let windowSet = Set(window.map(\.id))
             let catWords = categoryWords[category.id] ?? []
-            // 分类战斗：优先窗口内同类，不足则用全部同类（始终不混入无关词）
             let filtered = catWords.filter { windowSet.contains($0.id) }
             if filtered.count >= 6 { return filtered }
+            // 窗口内不足，直接取缓存的全库同类（无扫描）
             if catWords.count >= 6 { return catWords }
-            // 同类词仍不足 6 个：全部同类词+窗口内最接近词混合（优先同类）
-            return (catWords + base).prefix(20).shuffled()
         }
         return base
     }
@@ -1618,238 +1030,10 @@ final class TowerGameEngine: ObservableObject {
             options.insert(word.headword, at: index)
             question = Question(kind: kind, word: word, prompt: engDef,
                                 options: options, correctIndex: index, spellHint: "")
-        // MARK: - S3 新题型
-        case .listen:
-            // 听音辨义：TTS 朗读单词，4 选 1 选中文释义（须听懂且认识，比选词更难）
-            var options = Array(Set(pool.map { Self.firstLine($0.definitionCn) }.filter { $0 != cnDef })
-                .shuffled().prefix(3))
-            let index = Int.random(in: 0...options.count)
-            options.insert(cnDef, at: index)
-            question = Question(kind: kind, word: word, prompt: "", options: options, correctIndex: index, spellHint: "")
-            SpeechService.shared.speak(word.headword)
-        case .formChange:
-            // 词形变换：解析 exchange 字段，选正确变形
-            let forms = parseExchange(word.exchange ?? "")
-            if forms.count >= 4, let (formLabel, correctForm) = forms.first {
-                var opts = Set<String>()
-                opts.insert(correctForm)
-                // 从其他词的 exchange 找干扰项
-                for _ in 0..<10 {
-                    if let other = pool.randomElement(), let otherEx = other.exchange {
-                        let otherForms = parseExchange(otherEx)
-                        if let otherForm = otherForms.first?.1, otherForm != correctForm {
-                            opts.insert(otherForm)
-                        }
-                    }
-                    if opts.count >= 4 { break }
-                }
-                var options = Array(opts).shuffled()
-                let ci = options.firstIndex(of: correctForm) ?? 0
-                let prompt = "\(word.headword) → \(formLabel)"
-                question = Question(kind: kind, word: word, prompt: prompt, options: options, correctIndex: ci, spellHint: "")
-            } else { fallbackToEnToCn() }
-        case .cloze:
-            // 完形填空：例句挖空选词
-            if let sentence = WordMemoryService.shared.sentences(for: word.headword)?.first,
-               sentence.lowercased().contains(word.headword.lowercased()) {
-                let blanked = sentence.replacingOccurrences(of: word.headword, with: "____", options: .caseInsensitive)
-                var opts = Array(Set(pool.map(\.headword).filter { $0.lowercased() != word.headword.lowercased() })
-                    .shuffled().prefix(3))
-                let index = Int.random(in: 0...opts.count)
-                opts.insert(word.headword, at: index)
-                question = Question(kind: kind, word: word, prompt: blanked, options: opts, correctIndex: index, spellHint: "")
-            } else { fallbackToEnToCn() }
-        case .rootMerge:
-            // 词根拆解：碎片组合成词
-            if let (fragments, full) = WordMemoryService.shared.rootPuzzle(for: word.headword) {
-                var opts = Set<String>()
-                opts.insert(full)
-                for _ in 0..<12 {
-                    if let other = pool.randomElement(),
-                       let (_, otherFull) = WordMemoryService.shared.rootPuzzle(for: other.headword),
-                       otherFull != full {
-                        opts.insert(otherFull)
-                    }
-                    if opts.count >= 4 { break }
-                }
-                var options = Array(opts).shuffled()
-                let ci = options.firstIndex(of: full) ?? 0
-                let prompt = fragments.joined(separator: " + ")
-                question = Question(kind: kind, word: word, prompt: prompt, options: options, correctIndex: ci, spellHint: "")
-            } else { fallbackToEnToCn() }
-        case .match:
-            // 词义连线：4 词 × 4 释义配对
-            var ws = Set<String>()
-            ws.insert(word.headword)
-            for _ in 0..<8 {
-                if let other = pool.randomElement(), ws.count < 4 {
-                    ws.insert(other.headword)
-                }
-            }
-            let pairs = Array(ws).shuffled().map { w in
-                let target = pool.first(where: { $0.headword == w }) ?? word
-                return MatchPair(word: w, definition: Self.firstLine(target.definitionCn))
-            }
-            if pairs.count == 4, Set(pairs.map(\.definition)).count == 4 {
-                matchAnswers = [:]
-                question = Question(kind: kind, word: word, prompt: "将单词与释义配对", options: [], correctIndex: 0,
-                                    spellHint: "", pairs: pairs)
-            } else { fallbackToEnToCn() }
-        case .combo:
-            // 限时连击：60 秒连续作答基础题型（复用 timedTrial 限时，连击伤害由 resolveAnswer 处理）
-            let baseKinds: [QuestionKind] = [.enToCn, .cnToEn, .spell]
-            let baseKind = baseKinds.randomElement() ?? .enToCn
-            // 递归生成基础题（仅限这些题型）
-            if let q = baseQuestion(of: baseKind, word: word, cnDef: cnDef) {
-                question = q
-            } else { fallbackToEnToCn() }
-        // MARK: - S3.5 考试题型
-        case .judge:
-            // 判断正误：词 + 说法，判对错（50% 正确说法 / 50% 其他词释义）
-            let isTrue = Bool.random()
-            let other = pool.randomElement().map { Self.firstLine($0.definitionCn) } ?? cnDef
-            let claim = isTrue ? cnDef : other
-            question = Question(kind: kind, word: word,
-                                prompt: "「\(word.headword)」意为「\(claim)」？",
-                                options: ["✅ 正确", "❌ 错误"], correctIndex: isTrue ? 0 : 1, spellHint: "")
-        case .scramble:
-            // 乱序组词：打乱字母，选正确排列
-            let scrambled = String(word.headword.shuffled())
-            if scrambled.lowercased() != word.headword.lowercased() {
-                var opts = Array(Set(pool.map(\.headword).filter { $0.lowercased() != word.headword.lowercased() })
-                    .shuffled().prefix(3))
-                let index = Int.random(in: 0...opts.count)
-                opts.insert(word.headword, at: index)
-                question = Question(kind: kind, word: word, prompt: "乱序：\(scrambled)",
-                                    options: opts, correctIndex: index, spellHint: "")
-            } else { fallbackToEnToCn() }
-        case .synonym:
-            // 同义替换：选同义词（复用趣味记词同义词数据）
-            if let syns = WordMemoryService.shared.synonyms(for: word.headword), !syns.isEmpty {
-                let correct = syns.randomElement()!
-                var opts = Set<String>()
-                opts.insert(correct)
-                for _ in 0..<8 {
-                    if let o = pool.randomElement(), opts.count < 4 {
-                        opts.insert(o.headword)
-                    }
-                }
-                var options = Array(opts).shuffled()
-                let ci = options.firstIndex(of: correct) ?? 0
-                question = Question(kind: kind, word: word, prompt: "\(word.headword) 的同义词是？",
-                                    options: options, correctIndex: ci, spellHint: "")
-            } else { fallbackToEnToCn() }
-        case .listenSpell:
-            // 听音拼写：TTS 朗读 + 首字母提示
-            let first = word.headword.prefix(1)
-            question = Question(kind: kind, word: word, prompt: cnDef, options: [], correctIndex: 0,
-                                spellHint: "提示：首字母 \(first) · 共 \(word.headword.count) 个字母")
-            SpeechService.shared.speak(word.headword)
-        case .fillBlank:
-            // 选词填空：例句挖空选词（干扰项为词库其他词）
-            if let sentence = WordMemoryService.shared.sentences(for: word.headword)?.first,
-               sentence.lowercased().contains(word.headword.lowercased()) {
-                let blanked = sentence.replacingOccurrences(of: word.headword, with: "____", options: .caseInsensitive)
-                var opts = Array(Set(pool.map(\.headword).filter { $0.lowercased() != word.headword.lowercased() })
-                    .shuffled().prefix(3))
-                let index = Int.random(in: 0...opts.count)
-                opts.insert(word.headword, at: index)
-                question = Question(kind: kind, word: word, prompt: blanked, options: opts, correctIndex: index, spellHint: "")
-            } else { fallbackToEnToCn() }
-        case .sentenceMatch:
-            // 例句配对：4 词 × 4 例句
-            var ws = Set<String>()
-            ws.insert(word.headword)
-            for _ in 0..<8 {
-                if let o = pool.randomElement(), ws.count < 4 {
-                    ws.insert(o.headword)
-                }
-            }
-            var pairs: [MatchPair] = []
-            for w in ws {
-                if let sentence = WordMemoryService.shared.sentences(for: w)?.first {
-                    pairs.append(MatchPair(word: w, definition: sentence))
-                }
-            }
-            if pairs.count == 4, Set(pairs.map(\.definition)).count == 4 {
-                matchAnswers = [:]
-                question = Question(kind: kind, word: word, prompt: "将单词与例句配对", options: [], correctIndex: 0,
-                                    spellHint: "", pairs: pairs)
-            } else { fallbackToEnToCn() }
         }
         spellInput = ""
-        matchAnswers = [:]
         self.battle?.lastAnswerCorrect = nil
         self.battle?.chosenIndex = nil
-    }
-
-    /// 解析 exchange 字段（d:did/p:done/i:doing/3:does）→ [(标签, 变形)]
-    private func parseExchange(_ exchange: String) -> [(String, String)] {
-        let labels: [String: String] = ["d": "过去式", "p": "过去分词", "i": "现在分词",
-                                         "3": "第三人称", "s": "复数", "1": "比较级", "2": "最高级", "0": "复数/原形"]
-        return exchange.split(separator: "/").compactMap { seg in
-            let parts = seg.split(separator: ":", maxSplits: 1)
-            guard parts.count == 2 else { return nil }
-            let key = String(parts[0]), val = String(parts[1])
-            return labels[key].map { ($0, val) }
-        }.filter { !$0.1.isEmpty }
-    }
-
-    /// 出题兜底：英选中四选一
-    private func fallbackToEnToCn() {
-        guard let battle else { return }
-        let candidates = questionPool(for: battle.node)
-        guard let w = candidates.randomElement() else { return }
-        let cnDef = Self.firstLine(w.definitionCn)
-        var opts = Array(Set(pool.map { Self.firstLine($0.definitionCn) }.filter { $0 != cnDef }).shuffled().prefix(3))
-        let idx = Int.random(in: 0...opts.count)
-        opts.insert(cnDef, at: idx)
-        question = Question(kind: .enToCn, word: w, prompt: w.headword, options: opts, correctIndex: idx, spellHint: "")
-    }
-
-    /// 生成基础题型题目（供限时连击等复用）
-    private func baseQuestion(of kind: QuestionKind, word: Word, cnDef: String) -> Question? {
-        switch kind {
-        case .enToCn:
-            var opts = Array(Set(pool.map { Self.firstLine($0.definitionCn) }.filter { $0 != cnDef }).shuffled().prefix(3))
-            let idx = Int.random(in: 0...opts.count)
-            opts.insert(cnDef, at: idx)
-            return Question(kind: .enToCn, word: word, prompt: word.headword, options: opts, correctIndex: idx, spellHint: "")
-        case .cnToEn:
-            var opts = Array(Set(pool.map(\.headword).filter { $0 != word.headword }).shuffled().prefix(3))
-            let idx = Int.random(in: 0...opts.count)
-            opts.insert(word.headword, at: idx)
-            return Question(kind: .cnToEn, word: word, prompt: cnDef, options: opts, correctIndex: idx, spellHint: "")
-        case .spell:
-            let first = word.headword.prefix(1)
-            return Question(kind: .spell, word: word, prompt: cnDef, options: [], correctIndex: 0,
-                            spellHint: "提示：首字母 \(first) · 共 \(word.headword.count) 个字母")
-        default:
-            return nil
-        }
-    }
-
-    // MARK: - 词义连线交互
-
-    /// 词义连线：点击配对（词 ↔ 释义；再点取消）
-    func selectMatchPair(word: String, definition: String) {
-        guard phase == .battle, let question, question.kind == .match else { return }
-        if matchAnswers[word] == definition {
-            matchAnswers.removeValue(forKey: word)
-        } else {
-            matchAnswers[word] = definition
-        }
-        // 4 词全部配对且释义不重复 → 自动判分
-        if matchAnswers.count == question.pairs.count, Set(matchAnswers.values).count == question.pairs.count {
-            resolveMatch()
-        }
-    }
-
-    private func resolveMatch() {
-        guard let question, question.kind == .match else { return }
-        let correct = question.pairs.allSatisfy { matchAnswers[$0.word] == $0.definition }
-        matchAnswers = [:]
-        resolveAnswer(correct: correct, chosen: nil)
     }
 
     static func firstLine(_ definition: String) -> String {
@@ -1874,23 +1058,15 @@ final class TowerGameEngine: ObservableObject {
               battle.lastAnswerCorrect == nil else { return }
         battle.chosenIndex = chosen
         battle.answered += 1
-        if groupTotal > 0 { groupAnswered += 1 }   // S4：组内答题统计（破绽判定）
         let skillOn = !battle.skillsDisabled       // 鸡哥封印时为 false
 
         if correct {
             battle.combo += 1
-            // S4 完美判定：连击 ≥3 的答对 = 完美（伤害 ×1.5）
-            let isPerfect = battle.combo >= 3
-            battle.perfect = isPerfect
-            if isPerfect, groupTotal > 0 { groupPerfectCount += 1 }
             var damage = (skillOn && hero == .gambler) ? 2 : 1
             if skillOn && hero == .mage && battle.combo >= 3 { damage += 1 }
             damage += equipEffects.damage
             if hero == .demon { damage += max(0, -hp) / 3 }   // 不死不灭：负血越深攻击越狂
             if demonMode { damage += 2 }               // 魔功：命中伤害 +2
-            if isPerfect { damage = Int(Double(damage) * 1.5) }   // 完美：伤害 ×1.5
-            // 事件 buff：词灵求救/天降奇遇伤害加成（组内生效）
-            if groupTotal > 0 { damage += eventDamageBuff }
             var dealt = damage
             if battle.ability == .dodge && Int.random(in: 0..<10) < 3 {
                 dealt = 0                                // 幻影闪避：30% 免疫
@@ -1911,16 +1087,8 @@ final class TowerGameEngine: ObservableObject {
             if skillOn && hero == .healer && battle.combo % 2 == 0 {
                 hp = min(maxHP, hp + 1)
             }
-            // 连对 5 题回血 +1（化神 10 境起，不受职业技能影响）
-            if stage.index >= 10, battle.combo >= 5, battle.combo % 5 == 0 {
-                hp = min(maxHP, hp + 1)
-            }
             if hero == .demon {
                 hp = min(0, hp + 1)          // 魔气回涌：答对回升 1 点（至 0）
-            }
-            // 宠物/精灵技能随机触发（按状态概率）
-            if battle.enemyHP > 0, let skillMsg = activatePetSpriteSkill(battle: &battle) {
-                toast = (toast ?? "") + " " + skillMsg
             }
         } else {
             battle.combo = 0
@@ -1937,8 +1105,6 @@ final class TowerGameEngine: ObservableObject {
                 var hit = max(1, battle.attack + (skillOn && hero == .gambler ? 1 : 0) - equipEffects.defense)
                 let stagePenalty = max(0, (stage.index - 4) / 5) + (stage.index >= 14 ? 1 : 0)
                 hit += stagePenalty
-                // 境界压制：答错额外 +1（事件 debuff，组内生效）
-                if groupTotal > 0 { hit += eventPenaltyBuff }
                 if battle.consecutiveWrong >= 3 { hit += battle.consecutiveWrong - 2 }
                 if battle.ability == .berserk { hit += battle.answered / 3 }   // 狂暴：每 3 题 +1 攻
                 if battle.ability == .doubleHit { hit *= 2 }   // 马保国：闪电五连鞭
@@ -1960,8 +1126,6 @@ final class TowerGameEngine: ObservableObject {
             if battle.ability == .timeDrain && battle.isTimed {
                 battle.timeLeft = max(1, battle.timeLeft - 5)
             }
-            // 答错时宠物/精灵承受 1 点伤害（0 血自动离去）
-            damagePetSpriteOnWrong()
         }
 
         // Boss 不死身法：每答 3 题回 1 血
@@ -2055,52 +1219,6 @@ final class TowerGameEngine: ObservableObject {
         self.battle = nil
         question = nil
 
-        // 关卡组连战：组内还有子关卡 → 显示组内选择（继续/休息/突击），不再自动连战
-        if groupTotal > 0, groupIndex < groupTotal {
-            makeGroupChoices()
-            phase = .map
-            toast = messages.joined(separator: "  ")
-            return
-        }
-        // 关卡组全部通关
-        if groupTotal > 0 {
-            finishGroup(messages: &messages)
-            // 词妖潮事件：组完成不推进楼层，直接回地图
-            if eventWordTide {
-                eventWordTide = false
-                proceedToMap(messages: messages)
-                return
-            }
-        }
-        // 事件战斗结算（魔音灌耳/心魔幻境）
-        if eventEarBomb {
-            eventEarBomb = false
-            let correct = battle.answered
-            if correct >= 2 {
-                coins += 15
-                messages.append("🔊 抵御魔音，💰 +15！")
-            } else {
-                hp = hero == .demon ? hp - 4 : max(1, hp - 4)
-                messages.append("🔊 魔音入脑，❤️ -4！")
-            }
-            proceedToMap(messages: messages)
-            return
-        }
-        if eventMindTrial {
-            eventMindTrial = false
-            let correct = battle.answered
-            if correct > 0 {
-                let reward = correct * 5
-                coins += reward
-                messages.append("🧠 心魔试炼答对 \(correct) 题，💰 +\(reward)！")
-            } else {
-                hp = hero == .demon ? hp - 6 : max(1, hp - 6)
-                messages.append("🧠 心魔溃败，❤️ -6！")
-            }
-            proceedToMap(messages: messages)
-            return
-        }
-
         if battle.node == .boss {
             finishRun(victory: true)
         } else {
@@ -2111,164 +1229,12 @@ final class TowerGameEngine: ObservableObject {
             } else {
                 floor += 1
             }
-            proceedToMap(messages: messages)
-        }
-    }
-
-    // MARK: - 组内选择（每战后玩家选择继续/休息/突击）
-
-    /// 下一子关卡的节点类型（用于显示选择预览）
-    var nextSubBattleNode: NodeType? {
-        guard groupTotal > 0, groupIndex < groupTotal else { return nil }
-        return groupStages[groupIndex]
-    }
-
-    /// 预览子关卡的敌人信息（用于组内选择卡片，确定性返回第一个小怪）
-    func previewSubBattle(_ node: NodeType) -> (name: String, icon: String) {
-        switch node {
-        case .elite: return (stage.eliteName, "flame.fill")
-        case .timedTrial: return ("秘境守卫", "timer")
-        case .battle(let cat, _):
-            let minion = stage.minions.first ?? (name: "词妖", icon: "questionmark")
-            return (cat != nil ? "\(minion.name)见习" : minion.name, minion.icon)
-        default: return ("未知", "questionmark")
-        }
-    }
-
-    /// 最后一关的节点类型（用于"突击收尾"预览）
-    var rushSubBattleNode: NodeType? {
-        guard groupTotal > 0, groupTotal > 0 else { return nil }
-        return groupStages[groupTotal - 1]
-    }
-
-    /// 生成组内选择：每场子关卡胜利后展示（继续/休息/突击）
-    private func makeGroupChoices() {
-        guard groupTotal > 0, groupIndex < groupTotal else {
-            groupChoices = []
-            return
-        }
-        self.choices = []   // 组内休整期间隐藏地图旧节点，防止误点破坏组流程
-        var choices: [GroupChoice] = [.normal]
-        // 休息：血量越低出现概率越高（封顶 10%），且掉血 ≥30% 才可能触发
-        let hurtEnough = hero == .demon ? hp <= -3 : hp * 10 <= maxHP * 7
-        let restChance = hero == .demon
-            ? min(10, max(1, -hp * 2))                                      // 魔修按负血深度
-            : min(10, max(1, Int((1 - Double(hp) / Double(max(1, maxHP))) * 12)))   // 普通按掉血比例
-        if hurtEnough, Int.random(in: 0..<100) < restChance {
-            choices.append(.rest)
-        }
-        // 突击：至少还有 2 关以上（跳过中间直达最后一关）
-        if groupIndex + 1 < groupTotal {
-            choices.append(.rush)
-        }
-        groupChoices = choices
-    }
-
-    /// 选择组内行动：继续战斗 / 调息恢复 / 突击收尾
-    func chooseGroupChoice(_ choice: GroupChoice) {
-        guard phase == .map, groupTotal > 0, groupIndex < groupTotal, !groupChoices.isEmpty else { return }
-        groupChoices = []
-
-        switch choice {
-        case .normal:
-            groupIndex += 1
-            advanceGroup()
-        case .rest:
-            // 调息：回血 +5 后继续到下一关
-            hp = hero == .demon ? min(0, hp + 5) : min(maxHP, hp + 5)
-            toast = hero == .demon ? "🔥 调息回魔 +5" : "💧 调息恢复 +5"
-            groupIndex += 1
-            if groupIndex <= groupTotal {
-                advanceGroup()
-            } else {
-                // 休息后无后续关卡：直接组通关
-                var msgs: [String] = ["💧 调息恢复 +5"]
-                finishGroup(messages: &msgs)
-                floor += 1
-                proceedToMap(messages: msgs)
-            }
-        case .rush:
-            // 突击：跳到最后一关（组首领/精英）
-            groupIndex = groupTotal
-            advanceGroup()
-        }
-    }
-
-    /// 组内推进（无消息）：直接进入当前子关卡
-    private func advanceGroup() {
-        var messages: [String] = []
-        advanceGroup(messages: &messages)
-        if phase == .battle, !messages.isEmpty {
+            shortcutPending = false
+            saveRun()
+            makeChoices()
+            phase = .map
             toast = messages.joined(separator: "  ")
         }
-    }
-
-    /// 组内推进到当前子关卡：战斗直接开战；灵泉自动回血；商人弹商店
-    private func advanceGroup(messages: inout [String]) {
-        switch groupStages[groupIndex - 1] {
-        case .rest:
-            // 组内灵泉：自动回血，然后显示组内选择
-            hp = min(maxHP, hp + 15)
-            // 宠物/精灵同享滋养：各恢复一半生命
-            if petMaxHP > 0 { petHP = min(petMaxHP, petHP + max(1, petMaxHP / 2)) }
-            if spriteMaxHP > 0 { spriteHP = min(spriteMaxHP, spriteHP + max(1, spriteMaxHP / 2)) }
-            let msg = hero == .demon ? "🔥 魔气滋养 +15" : "💧 组内灵泉涤体 +15"
-            messages.append(msg)
-            persistAll()          // 宠物/精灵生命持久化
-            groupIndex += 1
-            if groupIndex < groupTotal {
-                makeGroupChoices()
-                phase = .map
-                toast = messages.joined(separator: "  ") + "  " + msg
-            } else {
-                // 灵泉收尾：直接组通关回地图
-                finishGroup(messages: &messages)
-                floor += 1
-                proceedToMap(messages: messages)
-            }
-        case .merchant:
-            // 组内商人：弹商店，离开后继续组内下一关（leaveMerchant）
-            merchantOffers = rollItems(count: 3, stageGate: stage.index, excludeOwned: true)
-            phase = .merchant
-            toast = "🛒 组内偶遇神秘商人"
-        default:
-            enterBattle(groupStages[groupIndex - 1], mode: .standard, canRetreat: groupCanRetreat)
-        }
-    }
-
-    /// 关卡组通关：小额固定奖励 + 高概率掉落 + 重置组状态（不自动回血，回血需选择休息）
-    private func finishGroup(messages: inout [String]) {
-        // 组通关奖励随段位递增：前期 2 → 后期 6
-        let tierBonus = min(6, 2 + stage.index / 4)
-        let bonus = tierBonus
-        coins += bonus
-        messages.append("🏆 关卡组通关 +\(bonus)")
-        // 秘路揭晓
-        if currentRoute == .mystery {
-            messages.append(groupRewardMult >= 2 ? "🎲 秘路大赚！" : (groupRewardMult <= 0.5 ? "💸 秘路血亏……" : "🎲 秘路平淡"))
-        }
-        // 组通关：高概率掉落（50%）；险路高品阶权重提升
-        if Int.random(in: 0..<100) < 50,
-           let drop = rollItems(count: 1, stageGate: stage.index, excludeOwned: false, tierBoost: groupTierBoost).first {
-            gainItem(drop)
-            if let last = toast { messages.append(last) }
-        }
-        // 组通关后宠物/精灵恢复三分之一生命
-        if petMaxHP > 0 { petHP = min(petMaxHP, petHP + max(1, petMaxHP / 3)) }
-        if spriteMaxHP > 0 { spriteHP = min(spriteMaxHP, spriteHP + max(1, spriteMaxHP / 3)) }
-        persistAll()          // 宠物/精灵生命持久化
-        resetGroup()
-        usedRoutes.removeAll()
-        branchRoutes = []
-    }
-
-    /// 节点/关卡组通关：回到地图（楼层已推进）
-    private func proceedToMap(messages: [String]) {
-        shortcutPending = false
-        saveRun()
-        makeChoices()
-        phase = .map
-        toast = messages.joined(separator: "  ")
     }
 
     func skipQuestion() {
@@ -2351,13 +1317,8 @@ final class TowerGameEngine: ObservableObject {
         if spriteHP == 0 { equipped["sprite"] = nil; toast = (toast ?? "") + " 🌟 精灵消散" }
         self.battle = nil
         question = nil
-        resetGroup()          // 撤退 = 放弃整个关卡组
         persistAll()
-        // 撤退不刷新关卡：原样恢复进入战斗前的选择界面（节点或分叉口路线）
-        choices = preGroupChoices
-        branchRoutes = preGroupRoutes
-        preGroupChoices = []
-        preGroupRoutes = []
+        makeChoices()
         phase = .map
         toast = "🏃 撤退完成，损失：" + lossLog.joined(separator: " ")
         // 撤退结束本次挑战：1/50 魔修觉醒
@@ -2423,48 +1384,6 @@ final class TowerGameEngine: ObservableObject {
         persistWealth()
 
         guard victory else {
-            // 💰 劫匪拦路：失败扣 30% 金币，不死亡
-            if eventRobber {
-                eventRobber = false
-                resetGroup()
-                let loss = max(1, coins * 30 / 100)
-                coins -= loss
-                persistWealth()
-                stopTimer()
-                advanceTask?.cancel()
-                floor += 1
-                saveRun()
-                makeChoices()
-                phase = .map
-                toast = "💰 劫匪抢走了 \(loss) 金币后扬长而去…"
-                return
-            }
-            // 🌙 月光宝盒：死亡时自动发动——随机回到当前境界任一节点（消耗 1 个）
-            if let idx = inventory.firstIndex(where: { $0.id == "moonlightBox" }) {
-                inventory.remove(at: idx)
-                persistWealth()
-                resetGroup()                        // 放弃当前关卡组
-                let target = Int.random(in: 1...max(1, stage.floors))
-                floor = target
-                usedCategoryIds = []
-                recentWordIds = []
-                branchFloors = Self.makeBranchFloors(floors: stage.floors)
-                usedRoutes = []
-                branchRoutes = []
-                lastRestFloor = -1
-                shortcutPending = false
-                if hero == .demon {
-                    hp = max(-10, hp + 40)          // 魔修：负血拉回（反噬身亡后回魂）
-                } else {
-                    hp = max(1, maxHP / 2)          // 普通：半血复生
-                }
-                saveRun()
-                makeChoices()
-                phase = .map
-                toast = "🌙 月光宝盒发动！时空倒流，回到第 \(target) 层"
-                return
-            }
-            resetGroup()            // 组内死亡：放弃整个关卡组
             clearSave()
             // 魔修死亡：身份结束，回到最初的选择界面
             if hero == .demon {
@@ -2513,20 +1432,8 @@ final class TowerGameEngine: ObservableObject {
         floor = 1
         usedCategoryIds = []
         recentWordIds = []
-        branchFloors = Self.makeBranchFloors(floors: stage.floors)   // 新境重新生成分叉口
-        usedRoutes = []
-        branchRoutes = []
-        lastRestFloor = -1          // 新境灵泉冷却重置
-        lastEventSpringFloor = -1
-        shortcutPending = false
         if hero != .demon { maxHP += 5 }  // 境界突破，根基更厚（魔修恒 0）
-        // 突破回复按段位递减：最多 20%（初入仙途 20% → 问道巅峰 12%）
-        let breakRatio: Double
-        if stage.index <= 4 { breakRatio = 0.2 }
-        else if stage.index <= 9 { breakRatio = 0.18 }
-        else if stage.index <= 13 { breakRatio = 0.15 }
-        else { breakRatio = 0.12 }
-        hp = min(hero == .demon ? 0 : maxHP, hp + max(5, Int(Double(maxHP) * breakRatio)))
+        hp = min(hero == .demon ? 0 : maxHP, hp + max(12, maxHP * 2 / 5))  // 突破回复约四成（生命仍跨境共用）
         saveRun()
     }
 

@@ -131,16 +131,6 @@ struct ItemDetailSheet: View {
                         .foregroundStyle(hero == restricted ? .green : .orange)
                 }
             }
-        } else if item.category == .pet || item.category == .sprite {
-            let typeName = item.category == .pet ? "宠物" : "精灵"
-            section(title: "类型：\(typeName)", icon: item.category == .pet ? "pawprint.fill" : "sparkles") {
-                HStack(spacing: 8) {
-                    Image(systemName: item.category == .pet ? "pawprint.fill" : "sparkles")
-                        .foregroundStyle(.orange)
-                    Text("\(typeName)——非装备，陪伴作战，拥有独立生命值与技能")
-                        .font(.callout)
-                }
-            }
         } else {
             section(title: "适用：通用", icon: "person.3.fill") {
                 HStack(spacing: 8) {
@@ -182,10 +172,7 @@ struct ItemDetailSheet: View {
     private func ownedSection(_ owned: OwnedItem) -> some View {
         section(title: "持有信息", icon: "clock.fill") {
             infoRow("获得时间", Self.formatter.string(from: owned.acquiredAt))
-            if item.category == .pet || item.category == .sprite {
-                // 宠物/精灵不显示耐久/磨损，生命值在游戏界面显示
-                infoRow("类型", item.category == .pet ? "宠物" : "精灵")
-            } else if item.maxDurability < 99 && item.category != .potion {
+            if item.maxDurability < 99 && item.category != .potion {
                 infoRow(stateLabel, "\(owned.durability)/\(item.maxDurability)")
                 ProgressView(value: Double(owned.durability), total: Double(item.maxDurability))
                     .tint(owned.durability <= 3 ? .red : item.tier.color)

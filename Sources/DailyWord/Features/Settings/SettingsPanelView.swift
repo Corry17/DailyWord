@@ -56,7 +56,7 @@ struct SettingsPanelView: View {
                 Divider()
                 Text("学习面板")
                     .font(.callout.weight(.medium))
-                Text("菜单栏弹窗与浮动学习面板共用外观设置。浮动面板快捷键：\((settings.hotKeys[.togglePanel] ?? .none).label)")
+                Text("菜单栏图标点击弹出的面板 与 ⌥W 浮动面板为同一界面，外观设置共用")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                 HStack {
@@ -84,7 +84,7 @@ struct SettingsPanelView: View {
                                  favoriteKey: "studyDefinition",
                                  onReset: { settings.definitionColor = nil })
                 HStack {
-                    Text("透明度只影响背景，文字始终清晰；移动快捷键：\([HotKeyAction.panelLeft, .panelRight, .panelUp, .panelDown].map { (settings.hotKeys[$0] ?? .none).label }.joined(separator: " / "))")
+                    Text("透明度只影响背景，文字始终清晰；快捷键可调背景，⌃⌥方向键可移动面板")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                     Spacer()
@@ -220,8 +220,29 @@ struct SettingsPanelView: View {
                     .foregroundStyle(.tertiary)
 
                 Divider()
+                Text("翻译")
+                    .font(.callout.weight(.medium))
+                Toggle("划词翻译整句（关闭则仅翻译选中的部分）",
+                       isOn: $settings.translateWholeSentence)
+                    .font(.caption)
+                Text("开启：选中句子的一部分时，翻译包含它的完整句子；关闭：只翻译选中的文字")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                HStack {
+                    Text("划词翻译需要辅助功能权限")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                    Button("重新申请权限") {
+                        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+                        AXIsProcessTrustedWithOptions(options)
+                    }
+                    .controlSize(.small)
+                    .help("如果之前拒绝了权限，点击重新弹出系统授权窗口")
+                }
+
+                Divider()
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("划词翻译：先打开翻译窗口，再选中文本自动更新；需要联网与辅助功能权限，关闭窗口后停止跟随")
                     Text("测试浮层：选择题可用 1234 或 ABCD；双击浮层关闭")
                     Text("学习界面：三连击空白处可快速关闭")
                     Button("重看上手引导") {

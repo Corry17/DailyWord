@@ -237,8 +237,25 @@ final class AppServices {
     private var translateClickMonitor: Any?
     private var lastTranslatedText = ""
 
+    /// 翻译窗口层级：输入翻译固定在基准层；划词结果窗在被呼出/操作时升到其上一层
+    private static let translateBaseLevel = NSWindow.Level(NSWindow.Level.popUpMenu.rawValue + 1)
+    private static let translateActiveLevel = NSWindow.Level(NSWindow.Level.popUpMenu.rawValue + 2)
+
+    /// 当前操作的窗口在上层：呼出或点击划词窗 → 升到输入翻译之上；
+    /// 打开/点击/关闭输入翻译 → 划词窗回落到基准层
+    private func setTranslateResultPanelOnTop(_ onTop: Bool) {
+        guard let panel = translateResultPanel else { return }
+        // 只有与输入翻译同屏时才需要抢上层；单独使用时保持基准层，不压住其他窗口
+        let raised = onTop && translateInputPanel != nil
+        panel.level = raised ? Self.translateActiveLevel : .floating
+        debugLog("划词结果窗层级切换 level=\(panel.level.rawValue)（置顶=\(raised)）")
+        if raised { panel.orderFrontRegardless() }
+    }
+
     /// 划词翻译：读取当前选中文本 → 翻译 → 浮窗显示；再次按快捷键隐藏
     private var lastTranslateSelectionCloseTime: TimeInterval = 0
+    /// 划词结果窗是否保持置顶：由快捷键呼出或误判恢复发起，用户去操作输入翻译窗时交还
+    private var translateResultShouldStayOnTop = false
     private func translateSelection() {
         // toggle：结果浮窗已显示 → 关闭
         if let panel = translateResultPanel {
@@ -247,11 +264,14 @@ final class AppServices {
             panel.orderOut(nil)
             translateResultPanel = nil
             translateHostingController = nil
+            translateResultShouldStayOnTop = false
             stopTranslateSync()
             return
         }
         guard ensureAccessibilityPermission() else { return }
         showNetworkHintIfNeeded()
+        // 快捷键呼出：结果窗为当前操作对象 → 浮到输入翻译之上
+        translateResultShouldStayOnTop = true
         performSelectionTranslation()
     }
 
@@ -349,6 +369,7 @@ final class AppServices {
         if let hosting = translateHostingController {
             // 复用面板：直接更新内容
             hosting.rootView = view
+            if translateResultShouldStayOnTop { setTranslateResultPanelOnTop(true) }
             return
         }
         let hosting = NSHostingController(rootView: view)
@@ -393,6 +414,10 @@ final class AppServices {
             centerPanel(panel, size: savedSize)
         }
         translateResultPanel = panel
+        panel.onUserMouseDown = { [weak self] in
+            self?.translateResultShouldStayOnTop = true
+            self?.setTranslateResultPanelOnTop(true)
+        }
         observeClose(of: panel) { [weak self] in
             ResizableTranslatePanel.saveOrigin(panel.frame.origin)
             self?.translateResultPanel = nil
@@ -402,6 +427,8 @@ final class AppServices {
         panel.orderFrontRegardless()
         // 关键：激活应用——NSCursor.set() 只在应用激活时有效（nonactivating 面板默认不激活）
         NSApp.activate(ignoringOtherApps: true)
+        // 快捷键呼出/误判恢复：刚出现的结果窗应压住输入翻译
+        if translateResultShouldStayOnTop { setTranslateResultPanelOnTop(true) }
     }
 
     /// 导入数据后刷新会话与词库（重新开始、通知词库页）
@@ -421,6 +448,7 @@ final class AppServices {
     }
 
     private func closeTranslateResult() {
+        translateResultShouldStayOnTop = false
         if let panel = translateResultPanel {
             ResizableTranslatePanel.saveOrigin(panel.frame.origin)
             panel.orderOut(nil)
@@ -441,17 +469,21 @@ final class AppServices {
             return
         }
         lastTranslateInputToggle = now
-        if let panel = translateInputPanel {
+        if translateInputPanel != nil {
             debugLog("toggle 分支：关闭现有输入翻译")
-            panel.orderOut(nil)
-            translateInputPanel = nil
+            closeTranslateInput()
             return
         }
         // 误判恢复：按 ⌥Z 时系统可能误触发 ⌃⌥Z 关掉划词翻译——
         // 若 0.5s 内划词翻译刚被关闭且此时打开了输入翻译 → 判定误判，恢复划词翻译
         if now - lastTranslateSelectionCloseTime < 0.5, !lastTranslatedText.isEmpty {
             debugLog("划词翻译疑似被误关，自动恢复")
+            // 恢复的是用户本来想要的划词窗：保持置顶，不又被输入翻译盖住
+            translateResultShouldStayOnTop = true
             translateSentencesWith(text: lastTranslatedText)
+        } else {
+            // 用户主动打开输入翻译：本次以输入翻译为当前操作对象
+            translateResultShouldStayOnTop = false
         }
         showNetworkHintIfNeeded()
         debugLog("创建输入翻译面板")
@@ -463,6 +495,11 @@ final class AppServices {
         )
         panel.onTripleClick = { [weak self] in
             self?.closeTranslateInput()
+        }
+        // 点击输入翻译 = 它拿到焦点 → 划词结果窗回落到基准层
+        panel.onUserMouseDown = { [weak self] in
+            self?.translateResultShouldStayOnTop = false
+            self?.setTranslateResultPanelOnTop(false)
         }
         panel.title = "输入翻译"
         // floating 层级：高于应用内普通窗口（不被覆盖），点击别的应用时变灰不消失
@@ -477,10 +514,15 @@ final class AppServices {
         panel.setContentSize(NSSize(width: 380, height: 140))
         panel.isReleasedWhenClosed = false
         // 置顶（高于菜单栏 popover 层级，不被背词面板遮挡）
-        panel.level = NSWindow.Level(NSWindow.Level.popUpMenu.rawValue + 1)
+        panel.level = Self.translateBaseLevel
         panel.center()
         translateInputPanel = panel
-        observeClose(of: panel) { [weak self] in self?.translateInputPanel = nil }
+        // 输入翻译刚打开（并会成为 key）→ 划词结果窗回到基准层，不抢占最上层
+        setTranslateResultPanelOnTop(false)
+        observeClose(of: panel) { [weak self] in
+            self?.translateInputPanel = nil
+            self?.setTranslateResultPanelOnTop(false)
+        }
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         debugLog("输入翻译显示 isVisible=\(panel.isVisible) frame=\(panel.frame) level=\(panel.level.rawValue)")
@@ -489,6 +531,8 @@ final class AppServices {
     private func closeTranslateInput() {
         translateInputPanel?.orderOut(nil)
         translateInputPanel = nil
+        // 输入翻译消失：划词结果窗不必再停留在置顶层
+        setTranslateResultPanelOnTop(false)
     }
 
     /// 辅助功能权限检查（划词翻译需要）

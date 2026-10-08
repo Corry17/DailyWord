@@ -97,6 +97,9 @@ final class ResizableTranslatePanel: NSPanel {
     static let maxWidth: CGFloat = 900
     static let maxHeight: CGFloat = 800
 
+    /// 用户在本面板内按下鼠标（表示当前正在操作本窗）→ 通知上层把本窗浮到另一个翻译窗之上
+    var onUserMouseDown: (() -> Void)?
+
     /// 顶栏高度（仅顶栏可拖动移动位置）
     private let topBarHeight: CGFloat = 30
 
@@ -308,6 +311,7 @@ final class ResizableTranslatePanel: NSPanel {
     override func sendEvent(_ event: NSEvent) {
         switch event.type {
         case .leftMouseDown:
+            onUserMouseDown?()
             let p = event.locationInWindow
             let bounds = contentView?.bounds ?? .zero
             // 边缘（14px）：启动手动 resize（吞掉事件，避免与系统 resize 冲突）
@@ -361,6 +365,8 @@ final class ResizableTranslatePanel: NSPanel {
 /// 支持三连击关闭的普通面板（输入翻译用）：仅在顶栏区域快速点击三次触发回调
 final class TripleClickPanel: NSWindow {
     var onTripleClick: (() -> Void)?
+    /// 用户在本面板内按下鼠标（表示当前正在操作本窗）→ 通知上层让另一个翻译窗回落
+    var onUserMouseDown: (() -> Void)?
     /// 顶栏高度（仅此区域三击关闭，避免输入框/结果区域误触）
     private let tripleClickBarHeight: CGFloat = 40
     /// 双击放大的延迟任务：350ms 内出现第三击则取消（三击只关闭不放大）
@@ -413,6 +419,7 @@ final class TripleClickPanel: NSWindow {
 
     override func sendEvent(_ event: NSEvent) {
         if event.type == .leftMouseDown {
+            onUserMouseDown?()
             // 手动激活：nonactivating 面板的 becomesKeyOnlyIfNeeded 不生效，
             // 点击时主动成为 key，输入框才能聚焦输入
             if !isKeyWindow {

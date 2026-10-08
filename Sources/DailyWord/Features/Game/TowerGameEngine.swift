@@ -758,13 +758,13 @@ final class TowerGameEngine: ObservableObject {
             if let category = availableCategories.shuffled().first {
                 routes.append(.battle(category: category, kind: randomKind()))
             }
-            if (hp <= maxHP * 0.5 || (hero == .demon && hp <= -3)), floor != lastRestFloor {
-            // 灵泉概率：血越低越高，封顶 10%
-            let restChance = hero == .demon
-                ? min(10, max(2, -hp * 2))
-                : min(10, max(2, Int((1 - Double(hp) / Double(max(1, maxHP))) * 12)))
-            if Int.random(in: 0..<100) < restChance { routes.append(.rest) }
-        }
+            if (hp <= maxHP / 2 || (hero == .demon && hp <= -3)), floor != lastRestFloor {
+                // 灵泉概率：血越低越高，封顶 10%
+                let restChance = hero == .demon
+                    ? min(10, max(2, -hp * 2))
+                    : min(10, max(2, Int((1 - Double(hp) / Double(max(1, maxHP))) * 12)))
+                if Int.random(in: 0..<100) < restChance { routes.append(.rest) }
+            }
             var unique: [NodeType] = []
             for node in routes where !unique.contains(node) { unique.append(node) }
             choices = Array(unique.prefix(3))
@@ -777,7 +777,7 @@ final class TowerGameEngine: ObservableObject {
         }
         if floor >= 3 { candidates.append(.elite(kind: randomKind())) }
         if floor >= 2 { candidates.append(.timedTrial(kind: randomKind())) }
-        if (hp <= maxHP * 0.5 || (hero == .demon && hp <= -3)), floor != lastRestFloor {
+        if (hp <= maxHP / 2 || (hero == .demon && hp <= -3)), floor != lastRestFloor {
             let restChance = hero == .demon
                 ? min(10, max(2, -hp * 2))
                 : min(10, max(2, Int((1 - Double(hp) / Double(max(1, maxHP))) * 12)))

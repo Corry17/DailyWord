@@ -17,3 +17,6 @@ Tools/dict-builder/data/
 *.log
 dailyword.sqlite*
 DailyWord备份-*.json
+
+# 本机 IDE / Agent 工作目录
+.qoder/

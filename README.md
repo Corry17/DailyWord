@@ -94,7 +94,7 @@ python3 Tools/dict-builder/build_dict.py \
 
 | 分支 | 用途 |
 | --- | --- |
-| [`main`](https://github.com/Corry17/DailyWord/tree/main) | 用户指定的最终版，加上项目说明与发布整理 |
+| [`main`](https://github.com/Corry17/DailyWord/tree/main) | 用户指定的最终版 + 项目说明 + 后续修复（编译错误、翻译窗口层级） |
 | [`archive/legacy-english`](https://github.com/Corry17/DailyWord/tree/archive/legacy-english) | `english` 目录的旧版源码快照 |
 | [`archive/final-snapshot`](https://github.com/Corry17/DailyWord/tree/archive/final-snapshot) | `english_backup_20260814_142540` 目录的最终版原始源码快照 |
 
